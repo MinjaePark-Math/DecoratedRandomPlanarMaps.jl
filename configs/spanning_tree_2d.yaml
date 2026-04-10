@@ -1,0 +1,17 @@
+model:
+  type: spanning_tree
+  faces: 800
+  seed: 11
+
+layout:
+  dimension: 2
+  engine: tutte
+  solver: auto
+  options:
+    hc_boundary_mode: face
+
+output:
+  export_web: ./exports/spanning_tree_2d
+  preview_svg: ./exports/spanning_tree_2d/preview.svg
+  show: true
+  timings_json: ./exports/spanning_tree_2d/timings.json

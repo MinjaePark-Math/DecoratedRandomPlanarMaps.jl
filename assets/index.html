@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>randmaps viewer</title>
+  <style>
+    html, body {
+      margin: 0;
+      height: 100%;
+      overflow: hidden;
+      background: #f6f8fb;
+    }
+    #app {
+      width: 100%;
+      height: 100%;
+    }
+    #hud {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      z-index: 10;
+      background: rgba(255, 255, 255, 0.92);
+      border: 1px solid #d9dee8;
+      border-radius: 8px;
+      padding: 10px 12px;
+      font: 13px/1.4 system-ui, sans-serif;
+      color: #2c3e50;
+      max-width: 320px;
+    }
+    #hud code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    #legend label {
+      display: block;
+      margin-top: 4px;
+    }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <div id="hud">
+    <div><strong>randmaps web viewer</strong></div>
+    <div id="summary">Loading…</div>
+    <div id="legend"></div>
+    <div style="margin-top: 8px; color: #667085;">
+      Serve this directory over HTTP if your browser blocks local <code>fetch()</code>.
+    </div>
+  </div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+    const FACE_COLOR = 0xFFF6BF;
+
+    const app = document.getElementById('app');
+    const summary = document.getElementById('summary');
+    const legend = document.getElementById('legend');
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0xf6f8fb);
+
+    const meta = await (await fetch('web_meta.json')).json();
+    const is2D = meta.dimension === 2;
+
+    let camera;
+    if (is2D) {
+      camera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1e6, 1e6);
+      camera.position.set(0, 0, 10);
+    } else {
+      camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.01, 1e7);
+      camera.position.set(0, 0, 10);
+    }
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio || 1);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    app.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    if (is2D) {
+      controls.enableRotate = false;
+      controls.screenSpacePanning = true;
+    }
+
+    if (!is2D) {
+      scene.add(new THREE.AmbientLight(0xffffff, 0.85));
+      const directional = new THREE.DirectionalLight(0xffffff, 0.6);
+      directional.position.set(0.5, 0.7, 1.0);
+      scene.add(directional);
+    }
+
+    async function fetchArray(url, ctor) {
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`Failed to fetch ${url}`);
+      return new ctor(await resp.arrayBuffer());
+    }
+
+    function addLegendToggle(name, object3d, color, checked = true) {
+      const id = `toggle-${name}`;
+      const wrapper = document.createElement('label');
+      wrapper.innerHTML = `<input id="${id}" type="checkbox" ${checked ? 'checked' : ''} /> <span style="color:${color}">■</span> ${name}`;
+      legend.appendChild(wrapper);
+      const input = wrapper.querySelector('input');
+      object3d.visible = checked;
+      input.addEventListener('change', () => {
+        object3d.visible = input.checked;
+      });
+    }
+
+    function expandFlatToXYZ(raw, dimension) {
+      if (dimension === 3) {
+        if (raw.length % 3 !== 0) {
+          throw new Error(`3D buffer length ${raw.length} is not divisible by 3`);
+        }
+        return raw;
+      }
+      if (dimension === 2) {
+        if (raw.length % 2 !== 0) {
+          throw new Error(`2D buffer length ${raw.length} is not divisible by 2`);
+        }
+        const n = raw.length / 2;
+        const out = new Float32Array(n * 3);
+        for (let i = 0; i < n; ++i) {
+          out[3 * i + 0] = raw[2 * i + 0];
+          out[3 * i + 1] = raw[2 * i + 1];
+          out[3 * i + 2] = 0.0;
+        }
+        return out;
+      }
+      throw new Error(`Unsupported dimension ${dimension}`);
+    }
+
+    function isFiniteXYZAt(flatXYZ, offset) {
+      return Number.isFinite(flatXYZ[offset + 0]) &&
+             Number.isFinite(flatXYZ[offset + 1]) &&
+             Number.isFinite(flatXYZ[offset + 2]);
+    }
+
+    function collectFiniteXYZ(flatXYZ) {
+      const out = [];
+      for (let i = 0; i + 2 < flatXYZ.length; i += 3) {
+        if (isFiniteXYZAt(flatXYZ, i)) {
+          out.push(flatXYZ[i + 0], flatXYZ[i + 1], flatXYZ[i + 2]);
+        }
+      }
+      return out;
+    }
+
+    function filterTriangleIndices(indices, vertsXYZ) {
+      const out = [];
+      for (let i = 0; i + 2 < indices.length; i += 3) {
+        const a = indices[i + 0];
+        const b = indices[i + 1];
+        const c = indices[i + 2];
+        const ia = 3 * a;
+        const ib = 3 * b;
+        const ic = 3 * c;
+        if (ia + 2 >= vertsXYZ.length || ib + 2 >= vertsXYZ.length || ic + 2 >= vertsXYZ.length) {
+          continue;
+        }
+        if (!isFiniteXYZAt(vertsXYZ, ia) || !isFiniteXYZAt(vertsXYZ, ib) || !isFiniteXYZAt(vertsXYZ, ic)) {
+          continue;
+        }
+        out.push(a, b, c);
+      }
+      return new Uint32Array(out);
+    }
+
+    function buildIndexedEdgePositions(indices, vertsXYZ) {
+      const out = [];
+      for (let i = 0; i + 1 < indices.length; i += 2) {
+        const a = indices[i + 0];
+        const b = indices[i + 1];
+        const ia = 3 * a;
+        const ib = 3 * b;
+        if (ia + 2 >= vertsXYZ.length || ib + 2 >= vertsXYZ.length) {
+          continue;
+        }
+        if (!isFiniteXYZAt(vertsXYZ, ia) || !isFiniteXYZAt(vertsXYZ, ib)) {
+          continue;
+        }
+        out.push(
+          vertsXYZ[ia + 0], vertsXYZ[ia + 1], vertsXYZ[ia + 2],
+          vertsXYZ[ib + 0], vertsXYZ[ib + 1], vertsXYZ[ib + 2],
+        );
+      }
+      return new Float32Array(out);
+    }
+
+    function filterPositionSegments(flatXYZ) {
+      const out = [];
+      for (let i = 0; i + 5 < flatXYZ.length; i += 6) {
+        if (!isFiniteXYZAt(flatXYZ, i) || !isFiniteXYZAt(flatXYZ, i + 3)) {
+          continue;
+        }
+        out.push(
+          flatXYZ[i + 0], flatXYZ[i + 1], flatXYZ[i + 2],
+          flatXYZ[i + 3], flatXYZ[i + 4], flatXYZ[i + 5],
+        );
+      }
+      return new Float32Array(out);
+    }
+
+    function fitPerspectiveCamera(flatPointsXYZ) {
+      const box = new THREE.Box3().setFromArray(flatPointsXYZ);
+      const sphere = box.getBoundingSphere(new THREE.Sphere());
+      controls.target.copy(sphere.center);
+      const distance = Math.max(sphere.radius * 2.5, 1.0);
+      camera.position.copy(sphere.center.clone().add(new THREE.Vector3(0, 0, distance)));
+      camera.near = Math.max(distance / 1000, 0.001);
+      camera.far = Math.max(distance * 1000, 100.0);
+      camera.updateProjectionMatrix();
+      controls.update();
+    }
+
+    function fitOrthoCamera(flatPointsXYZ) {
+      const box = new THREE.Box3().setFromArray(flatPointsXYZ);
+      const center = box.getCenter(new THREE.Vector3());
+      const size = box.getSize(new THREE.Vector3());
+      const aspect = window.innerWidth / window.innerHeight;
+      const pad = 1.1;
+
+      let halfW = Math.max(size.x * 0.5 * pad, 1e-6);
+      let halfH = Math.max(size.y * 0.5 * pad, 1e-6);
+      if (halfW / halfH > aspect) {
+        halfH = halfW / aspect;
+      } else {
+        halfW = halfH * aspect;
+      }
+
+      camera.left = -halfW;
+      camera.right = halfW;
+      camera.top = halfH;
+      camera.bottom = -halfH;
+      camera.near = -1e6;
+      camera.far = 1e6;
+      camera.position.set(center.x, center.y, 10);
+      camera.updateProjectionMatrix();
+      controls.target.set(center.x, center.y, 0);
+      controls.update();
+    }
+
+    const rawVerts = await fetchArray(meta.files.vertices ?? 'data_verts.bin', Float32Array);
+    const verts = expandFlatToXYZ(rawVerts, meta.dimension);
+    const finitePoints = collectFiniteXYZ(verts);
+    const points = finitePoints.length ? finitePoints : [0, 0, 0];
+
+    if (is2D) {
+      fitOrthoCamera(points);
+    } else {
+      fitPerspectiveCamera(points);
+    }
+
+    const faceFile = meta.files?.faces;
+    if (faceFile) {
+      const faces = await fetchArray(faceFile, Uint32Array);
+      const filteredFaces = filterTriangleIndices(faces, verts);
+      if (filteredFaces.length) {
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(verts, 3));
+        geometry.setIndex(Array.from(filteredFaces));
+        if (!is2D) {
+          geometry.computeVertexNormals();
+        }
+
+        const material = is2D
+          ? new THREE.MeshBasicMaterial({
+              color: FACE_COLOR,
+              transparent: true,
+              opacity: 0.24,
+              side: THREE.DoubleSide,
+              depthWrite: false,
+            })
+          : new THREE.MeshPhongMaterial({
+              color: FACE_COLOR,
+              transparent: true,
+              opacity: 0.62,
+              side: THREE.DoubleSide,
+            });
+
+        const mesh = new THREE.Mesh(geometry, material);
+        if (is2D) {
+          mesh.renderOrder = 0;
+        }
+        scene.add(mesh);
+        addLegendToggle('faces', mesh, '#fff6bf', !is2D);
+      }
+    }
+
+    for (const group of meta.edge_groups ?? []) {
+      let geometry;
+
+      if ((group.kind ?? 'index_pairs') === 'positions') {
+        const raw = await fetchArray(group.file, Float32Array);
+        const pos = filterPositionSegments(expandFlatToXYZ(raw, meta.dimension));
+        if (!pos.length) {
+          continue;
+        }
+        geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      } else {
+        const data = await fetchArray(group.file, Uint32Array);
+        const positions = buildIndexedEdgePositions(data, verts);
+        if (!positions.length) {
+          continue;
+        }
+        geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      }
+
+      const material = new THREE.LineBasicMaterial({
+        color: group.color ?? '#2c3e50',
+        depthTest: !is2D,
+        transparent: false,
+      });
+      const lines = new THREE.LineSegments(geometry, material);
+      if (is2D) {
+        lines.renderOrder = group.name === 'exploration' ? 20 : 10;
+      }
+      scene.add(lines);
+      addLegendToggle(group.name, lines, group.color ?? '#2c3e50', group.default_visible ?? true);
+    }
+
+    const paramSummary = (meta.parameters_summary && String(meta.parameters_summary).trim().length) ? ` · ${meta.parameters_summary}` : '';
+    summary.textContent = `${meta.model}${paramSummary} · ${meta.dimension}D · vertices=${meta.num_vertices} · edges=${meta.num_edges}`;
+
+    window.addEventListener('resize', () => {
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      if (is2D) {
+        fitOrthoCamera(points);
+      } else {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+      }
+    });
+
+    function animate() {
+      requestAnimationFrame(animate);
+      controls.update();
+      renderer.render(scene, camera);
+    }
+    animate();
+  </script>
+</body>
+</html>

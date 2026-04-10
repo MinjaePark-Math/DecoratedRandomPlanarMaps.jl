@@ -1,0 +1,16 @@
+model:
+  type: uniform
+  faces: 500
+  seed: 5
+
+layout:
+  dimension: 3
+  engine: sfdp
+  normalize_scale: 1.0
+
+output:
+  export_web: ./exports/uniform_3d
+  export_stl: ./exports/uniform_3d/uniform_3d.stl
+  preview_web: ./exports/uniform_3d
+  show: true
+  timings_json: ./exports/uniform_3d/timings.json

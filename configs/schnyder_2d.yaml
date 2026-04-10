@@ -1,0 +1,16 @@
+model:
+  type: schnyder
+  faces: 400
+  seed: 7
+
+layout:
+  dimension: 2
+  engine: tutte
+  solver: auto
+  boundary_scale: 30.0
+
+output:
+  export_web: ./exports/schnyder_2d
+  preview_svg: ./exports/schnyder_2d/preview.svg
+  show: true
+  timings_json: ./exports/schnyder_2d/timings.json

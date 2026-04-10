@@ -1,0 +1,19 @@
+model:
+  type: fk
+  faces: 800
+  p: 0.25
+  seed: 11
+
+layout:
+  dimension: 2
+  engine: tutte
+  solver: auto
+  radius: 50.0
+  options:
+    hc_boundary_mode: h_gasket
+
+output:
+  export_web: ./exports/fk_h_gasket
+  preview_svg: ./exports/fk_h_gasket/preview.svg
+  show: true
+  timings_json: ./exports/fk_h_gasket/timings.json

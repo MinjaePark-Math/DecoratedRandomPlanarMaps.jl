@@ -1,0 +1,24 @@
+
+model:
+  type: fk
+  faces: 800
+  p: 0.25
+  seed: 11
+  sampling_method: auto
+  # pool_size: 128
+  # mh_steps: 512
+
+layout:
+  dimension: 3
+  engine: sfdp
+  normalize_scale: 1.0
+  # K: 0.35
+  # repulsiveforce: 1.2
+  # iterations: 300
+
+output:
+  export_web: ./exports/fk_3d
+  export_stl: ./exports/fk_3d/fk_3d.stl
+  preview_web: ./exports/fk_3d
+  show: true
+  timings_json: ./exports/fk_3d/timings.json
