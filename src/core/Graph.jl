@@ -9,9 +9,8 @@ struct WeightedGraph
     degrees::Vector{Float64}
 end
 
-function _empty_edges()
-    return Matrix{Int32}(undef, 0, 2)
-end
+_empty_edges() = Matrix{Int32}(undef, 0, 2)
+_empty_triangles() = Matrix{Int32}(undef, 0, 3)
 
 function sanitize_edge_array(edges)::Matrix{Int32}
     if edges isa AbstractMatrix

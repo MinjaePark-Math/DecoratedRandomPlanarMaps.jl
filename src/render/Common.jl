@@ -12,9 +12,6 @@ const EDGE_COLOR_HINTS = Dict(
     "exploration" => "#27ae60",
 )
 
-_empty_triangles() = Matrix{Int32}(undef, 0, 3)
-_empty_edges() = Matrix{Int32}(undef, 0, 2)
-
 function sanitize_triangles(triangles; drop_degenerate::Bool=true, deduplicate::Bool=true)
     arr = Int32.(triangles)
     isempty(arr) && return _empty_triangles()
@@ -70,8 +67,8 @@ function fan_triangulate_faces(faces; drop_degenerate::Bool=true, deduplicate::B
     for face in _iter_faces(faces)
         length(face) < 3 && continue
         anchor = face[1]
-        for i in 2:(length(face) - 1)
-            push!(triangles, (anchor, face[i], face[i + 1]))
+        for i in 2:(length(face)-1)
+            push!(triangles, (anchor, face[i], face[i+1]))
         end
     end
     if isempty(triangles)
