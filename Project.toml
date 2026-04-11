@@ -1,7 +1,7 @@
 name = "DecoratedRandomPlanarMaps"
 uuid = "4530f583-3fb5-4466-8c96-73bae2706f33"
-authors = ["Minjae Park"]
 version = "0.5.0"
+authors = ["Minjae Park"]
 
 [deps]
 JSON3 = "0f8b85d8-7281-11e9-16c2-39a750bddbf1"
@@ -17,6 +17,9 @@ GeometryBasics = "5c1252a2-5f33-56bf-86c9-59e7332b4326"
 
 [extensions]
 DecoratedRandomPlanarMapsMakieExt = ["GLMakie", "GeometryBasics"]
+
+[compat]
+JSON3 = "1"
 
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
