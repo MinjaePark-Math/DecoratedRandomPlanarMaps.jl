@@ -23,6 +23,7 @@ include("render/Web.jl")
 include("render/SVG.jl")
 
 include("layout/Tutte.jl")
+include("layout/CirclePacking.jl")
 include("layout/SFDP.jl")
 include("layout/Problem.jl")
 
@@ -41,7 +42,7 @@ export build_hc_map, build_hc_map_from_word, sample_fk_word, sample_hc_word,
     estimate_fk_exact_rejection_acceptance, recommended_fk_approx_sampler_params
 export LayoutProblem, prepare_layout_problem
 export DirichletSolveInfo, solve_dirichlet_laplacian, harmonic_measure_boundary_positions
-export compute_tutte_layout, compute_sfdp_layout
+export compute_tutte_layout, compute_circle_packing_layout, compute_sfdp_layout
 export EDGE_COLOR_HINTS, sanitize_triangles, fan_triangulate_faces, surface_triangles,
     grouped_edges, pad_positions_3d, should_include_exploration, exploration_segment_points,
     fk_q_from_p, model_parameter_pairs, model_parameter_string, model_display_name, default_render_title

@@ -65,7 +65,7 @@ function _compute_force_layout_3d(
     pos .= randn(rng, n, 3)
     _normalize_pointcloud!(pos, 1.0)
 
-    edge_array = first(collapse_undirected_edges(edges; drop_loops=true))
+    edge_array, edge_weights = collapse_undirected_edges(edges; drop_loops=true)
     k = K === nothing ? 1.0 / cbrt(max(n, 1)) : float(K)
     k > 0 || throw(ArgumentError("K must be positive"))
     repulse = float(repulsiveforce)
@@ -91,7 +91,7 @@ function _compute_force_layout_3d(
             v = Int(edge_array[r, 2]) + 1
             δ = pos[u, :] .- pos[v, :]
             dist = max(norm(δ), 1.0e-6)
-            force = dist^2 / k
+            force = edge_weights[r] * dist^2 / k
             vecf = (δ ./ dist) .* force
             disp[u, :] .-= vecf
             disp[v, :] .+= vecf
@@ -178,8 +178,11 @@ function compute_sfdp_layout(
             rm(tmp; force=true)
             return _normalize_pointcloud!(pos, float(scale))
         catch
+            @warn "Graphviz sfdp failed; falling back to the built-in O(n^2) force layout. Installing/updating Graphviz from graphviz.org is recommended for faster 3D layouts."
             isfile(tmp) && rm(tmp; force=true)
         end
+    else
+        @warn "Graphviz sfdp was not found on PATH; falling back to the built-in O(n^2) force layout. Installing Graphviz from graphviz.org is recommended for much faster 3D layouts."
     end
 
     return _compute_force_layout_3d(

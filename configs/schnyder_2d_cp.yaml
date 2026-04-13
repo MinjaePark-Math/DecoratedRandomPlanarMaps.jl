@@ -1,0 +1,15 @@
+model:
+  type: schnyder
+  faces: 1000
+  seed: 7
+
+layout:
+  dimension: 2
+  engine: circle_packing
+  maxiter: 100
+
+output:
+  export_web: ./exports/schnyder_2d_cp
+  preview_svg: ./exports/schnyder_2d_cp/preview.svg
+  show: true
+  timings_json: ./exports/schnyder_2d_cp/timings.json

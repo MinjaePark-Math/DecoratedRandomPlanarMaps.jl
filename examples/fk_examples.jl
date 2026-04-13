@@ -10,9 +10,9 @@ end
 # Comment out any block you do not want.
 # Change `hc_boundary_mode` to "c_gasket" if you want the c-gasket instead.
 
-faces = 10000
-seed = 11
-p = 0.25
+faces = 2000
+seed = 17
+p = 0.5
 outroot = joinpath(@__DIR__, "out", "fk")
 mkpath(outroot)
 
@@ -124,8 +124,8 @@ end
 # ------------------------------------------------------------------
 # Optional Makie
 # ------------------------------------------------------------------
-using GLMakie
-using GeometryBasics
+# using GLMakie
+# using GeometryBasics
 # render_makie_2d(
 #     problem2.render_map_data,
 #     pos2;
@@ -135,13 +135,12 @@ using GeometryBasics
 #     metadata=meta2_full,
 #     title="fk · 2D Makie",
 # )
-
-render_makie_3d(
-    problem3.render_map_data,
-    pos3;
-    edge_groups=problem3.edge_groups,
-    faces=problem3.faces,
-    triangles=problem3.surface_triangles,
-    metadata=meta3,
-    title="fk · 3D Makie",
-)
+# render_makie_3d(
+#     problem3.render_map_data,
+#     pos3;
+#     edge_groups=problem3.edge_groups,
+#     faces=problem3.faces,
+#     triangles=problem3.surface_triangles,
+#     metadata=meta3,
+#     title="fk · 3D Makie",
+# )

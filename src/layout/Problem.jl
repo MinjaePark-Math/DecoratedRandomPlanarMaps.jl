@@ -8,8 +8,10 @@ Base.@kwdef struct LayoutProblem
     boundary_positions::Union{Nothing,Matrix{Float64}} = nothing
     faces::Any = nothing
     surface_triangles::Union{Nothing,Matrix{Int32}} = nothing
+    surface_triangle_edge_ids::Union{Nothing,Matrix{Int32}} = nothing
     metadata::Dict{String,Any} = Dict{String,Any}()
     render_map_data::Any = nothing
+    render_vertex_indices::Union{Nothing,Vector{Int32}} = nothing
 end
 
 function _regular_polygon(num_vertices::Integer, radius::Real; phase::Real=0.0)
@@ -45,7 +47,7 @@ function _ordered_unique_vertices(chunks...)
     return out
 end
 
-function _reindex_edges(edge_array, old_to_new)
+function _reindex_edges(edge_array, old_to_new; deduplicate::Bool=true)
     arr = sanitize_edge_array(edge_array)
     if size(arr, 1) == 0
         return Matrix{Int32}(undef, 0, 2)
@@ -55,10 +57,10 @@ function _reindex_edges(edge_array, old_to_new)
         remapped[i, 1] = Int32(old_to_new[Int(arr[i, 1])])
         remapped[i, 2] = Int32(old_to_new[Int(arr[i, 2])])
     end
-    return _deduplicate_undirected_edges(remapped)
+    return deduplicate ? _deduplicate_undirected_edges(remapped) : remapped
 end
 
-function _reindex_triangles(triangles, old_to_new)
+function _reindex_triangles(triangles, old_to_new; deduplicate::Bool=true)
     tri = Int32.(triangles)
     size(tri, 1) == 0 && return Matrix{Int32}(undef, 0, 3)
     remapped = Matrix{Int32}(undef, size(tri, 1), 3)
@@ -67,7 +69,1106 @@ function _reindex_triangles(triangles, old_to_new)
             remapped[i, j] = Int32(old_to_new[Int(tri[i, j])])
         end
     end
-    return sanitize_triangles(remapped; drop_degenerate=true, deduplicate=true)
+    return sanitize_triangles(remapped; drop_degenerate=true, deduplicate=deduplicate)
+end
+
+function _triangle_side_edge_ids(triangles, green_edges, diag_edges, edge_u, edge_v)
+    tri = Int32.(triangles)
+    greens = Int32.(green_edges)
+    diags = Int32.(diag_edges)
+    size(tri, 1) == 0 && return Matrix{Int32}(undef, 0, 3)
+
+    side_edges = Matrix{Int32}(undef, size(tri, 1), 3)
+    for i in 1:size(tri, 1)
+        a = tri[i, 1]
+        b = tri[i, 2]
+        c = tri[i, 3]
+        side_pairs = (
+            (min(a, b), max(a, b)),
+            (min(b, c), max(b, c)),
+            (min(c, a), max(c, a)),
+        )
+        triangle_edges = Int32[greens[i, 1], greens[i, 2], diags[i]]
+        assigned = falses(3)
+
+        for edge_id in triangle_edges
+            edge_id >= 0 || throw(ArgumentError("triangle edge ids must be nonnegative"))
+            pair = (
+                min(edge_u[Int(edge_id)+1], edge_v[Int(edge_id)+1]),
+                max(edge_u[Int(edge_id)+1], edge_v[Int(edge_id)+1]),
+            )
+
+            matched = 0
+            for j in 1:3
+                if !assigned[j] && side_pairs[j] == pair
+                    matched = j
+                    break
+                end
+            end
+            matched != 0 || throw(ArgumentError("failed to match an FK triangle edge id to a triangle side"))
+            side_edges[i, matched] = edge_id
+            assigned[matched] = true
+        end
+
+        all(assigned) || throw(ArgumentError("incomplete FK triangle edge-id assignment"))
+    end
+
+    return side_edges
+end
+
+function _surface_triangle_data(map_data::FKMap)
+    tri_faces_all = Int32.(map_data.triangulation_faces)
+    tri_green_all = Int32.(map_data.triangle_green_edges)
+    tri_diag_all = Int32.(map_data.triangle_diag_edge)
+
+    nrows = size(tri_faces_all, 1)
+    size(tri_green_all, 1) == nrows || throw(ArgumentError("triangle_green_edges must align with triangulation_faces"))
+    length(tri_diag_all) == nrows || throw(ArgumentError("triangle_diag_edge must align with triangulation_faces"))
+
+    valid = BitVector(undef, nrows)
+    for i in 1:nrows
+        valid[i] = _triangle_has_distinct_vertices(view(tri_faces_all, i, :))
+    end
+
+    tri_faces = tri_faces_all[valid, :]
+    tri_green = tri_green_all[valid, :]
+    tri_diag = tri_diag_all[valid]
+    triangle_edge_ids = _triangle_side_edge_ids(tri_faces, tri_green, tri_diag, map_data.edge_u, map_data.edge_v)
+    return tri_faces, triangle_edge_ids
+end
+
+@inline function _triangle_has_distinct_vertices(tri)
+    return (tri[1] != tri[2]) && (tri[2] != tri[3]) && (tri[1] != tri[3])
+end
+
+function _drop_self_loops(edge_array)
+    arr = sanitize_edge_array(edge_array)
+    size(arr, 1) == 0 && return arr
+    keep = arr[:, 1] .!= arr[:, 2]
+    return arr[keep, :]
+end
+
+function _gasket_cleanup_mask(
+    map_data::FKMap,
+    selected_triangles_old,
+    selected_green,
+    selected_diag,
+)
+    nrows = size(selected_triangles_old, 1)
+    valid = BitVector(undef, nrows)
+    supported = Dict{Int32,Int}()
+
+    for i in 1:nrows
+        tri = view(selected_triangles_old, i, :)
+        valid[i] = _triangle_has_distinct_vertices(tri)
+        valid[i] || continue
+        for e in selected_green[i, :]
+            e < 0 && continue
+            supported[e] = get(supported, e, 0) + 1
+        end
+        d = selected_diag[i]
+        d < 0 && continue
+        supported[d] = get(supported, d, 0) + 1
+    end
+
+    drop_edge_ids = Set{Int32}()
+    for i in 1:nrows
+        valid[i] && continue
+
+        g1 = selected_green[i, 1]
+        g2 = selected_green[i, 2]
+        if g1 >= 0 || g2 >= 0
+            candidate = Int32(-1)
+            if g1 >= 0 && g2 >= 0 && g1 != g2
+                s1 = get(supported, g1, 0)
+                s2 = get(supported, g2, 0)
+                candidate = if s1 < s2
+                    g1
+                elseif s2 < s1
+                    g2
+                else
+                    max(g1, g2)
+                end
+            else
+                candidate = max(g1, g2)
+            end
+            candidate >= 0 && push!(drop_edge_ids, candidate)
+        end
+
+        d = selected_diag[i]
+        if d >= 0 && map_data.edge_u[Int(d)+1] == map_data.edge_v[Int(d)+1]
+            push!(drop_edge_ids, d)
+        end
+    end
+
+    return valid, drop_edge_ids
+end
+
+abstract type _CurrentGasketItem end
+
+struct _CurrentGasketPlain <: _CurrentGasketItem
+    ch::Char
+    step::Int
+end
+
+mutable struct _CurrentGasketHole <: _CurrentGasketItem
+    kind::Char
+    start_step::Int
+    end_step::Int
+    children::Vector{_CurrentGasketItem}
+end
+
+mutable struct _GasketLayoutVertex
+    is_hamburger::Bool
+    darts::Vector{Int32}
+end
+
+mutable struct _GasketLayoutState
+    vertices::Vector{_GasketLayoutVertex}
+    dart_tail::Vector{Int32}
+    dart_head::Vector{Int32}
+    dart_twin::Vector{Int32}
+    dart_edge::Vector{Int32}
+    edge_u::Vector{Int32}
+    edge_v::Vector{Int32}
+    edge_kind::Vector{String}
+    current_v_h::Int32
+    current_v_c::Int32
+    prev_v_h::Vector{Int32}
+    prev_v_c::Vector{Int32}
+    prev_v_f::Vector{Int32}
+    boundary_cycle::Vector{Int32}
+end
+
+_current_gasket_start_char(kind::Char) = kind == 'h' ? 'c' : 'h'
+_current_gasket_order_char(kind::Char) = kind == 'h' ? 'H' : 'C'
+_current_gasket_child_kind(kind::Char) = kind == 'h' ? 'c' : 'h'
+
+function _current_gasket_plain_allowed(kind::Char)
+    return kind == 'h' ? Set(('c', 'C')) : Set(('h', 'H'))
+end
+
+function _gasket_pairing_data(map_data::FKMap)
+    phi = Dict{Int,Int}()
+    h_h_steps = Set{Int}()
+    c_c_steps = Set{Int}()
+    f_h_steps = Set{Int}()
+    f_c_steps = Set{Int}()
+
+    for i in eachindex(map_data.production_steps)
+        prod_step = Int(map_data.production_steps[i])
+        order_step = Int(map_data.order_steps[i])
+        phi[order_step] = prod_step
+        if map_data.order_symbols[i] == 'H'
+            push!(h_h_steps, order_step)
+        elseif map_data.order_symbols[i] == 'C'
+            push!(c_c_steps, order_step)
+        elseif map_data.order_symbols[i] == 'F'
+            if map_data.fulfilled_by[i] == 'h'
+                push!(f_h_steps, order_step)
+            elseif map_data.fulfilled_by[i] == 'c'
+                push!(f_c_steps, order_step)
+            end
+        end
+    end
+
+    return Dict{String,Any}(
+        "phi" => phi,
+        "h_h_steps" => h_h_steps,
+        "c_c_steps" => c_c_steps,
+        "f_h_steps" => f_h_steps,
+        "f_c_steps" => f_c_steps,
+    )
+end
+
+function _current_gasket_step_indices(start_step::Int, end_step::Int, kind::Char, pair_data)
+    phi = pair_data["phi"]
+    h_h_steps = pair_data["h_h_steps"]
+    c_c_steps = pair_data["c_c_steps"]
+    f_h_steps = pair_data["f_h_steps"]
+    f_c_steps = pair_data["f_c_steps"]
+
+    gasket_idx = collect(start_step+1:end_step-1)
+    if kind == 'h'
+        for f in sort!(collect(intersect(f_c_steps, Set(gasket_idx))))
+            setdiff!(gasket_idx, phi[f]:f)
+        end
+        for h_h in sort!(collect(intersect(h_h_steps, Set(gasket_idx))))
+            setdiff!(gasket_idx, [phi[h_h], h_h])
+        end
+    else
+        for f in sort!(collect(intersect(f_h_steps, Set(gasket_idx))))
+            setdiff!(gasket_idx, phi[f]:f)
+        end
+        for c_c in sort!(collect(intersect(c_c_steps, Set(gasket_idx))))
+            setdiff!(gasket_idx, [phi[c_c], c_c])
+        end
+    end
+    reverse!(gasket_idx)
+    return gasket_idx
+end
+
+function _build_current_gasket_tree_children(map_data::FKMap, pair_data, kind::Char, reversed_steps::Vector{Int})
+    phi = pair_data["phi"]
+    allowed = _current_gasket_plain_allowed(kind)
+    child_kind = _current_gasket_child_kind(kind)
+    work = copy(reversed_steps)
+    children = _CurrentGasketItem[]
+
+    for step in copy(reversed_steps)
+        step in work || continue
+        ch = map_data.word[step+1]
+        if ch == 'F'
+            start = phi[step]
+            inner = Int[q for q in work if start < q < step]
+            child_children = _build_current_gasket_tree_children(map_data, pair_data, child_kind, inner)
+            push!(children, _CurrentGasketHole(child_kind, start, step, child_children))
+            setdiff!(work, start:step-1)
+        elseif ch in allowed
+            push!(children, _CurrentGasketPlain(ch, step))
+        end
+    end
+
+    reverse!(children)
+    return children
+end
+
+function _build_current_gasket_tree(map_data::FKMap, kind::Char, start_step::Int, end_step::Int)
+    pair_data = _gasket_pairing_data(map_data)
+    reversed_steps = _current_gasket_step_indices(start_step, end_step, kind, pair_data)
+    children = _build_current_gasket_tree_children(map_data, pair_data, kind, reversed_steps)
+    return _CurrentGasketHole(kind, start_step, end_step, children)
+end
+
+_current_gasket_original_size(hole::_CurrentGasketHole) = length(hole.children) + 1
+
+function _current_gasket_plain_perimeter(ch::Char)
+    if ch == 'H' || ch == 'C'
+        return 1
+    elseif ch == 'h' || ch == 'c'
+        return -1
+    end
+    throw(ArgumentError("unexpected gasket symbol $(repr(ch))"))
+end
+
+function _current_gasket_hole_perimeter(hole::_CurrentGasketHole)
+    result = 0
+    for child in hole.children
+        if child isa _CurrentGasketPlain
+            result += _current_gasket_plain_perimeter((child::_CurrentGasketPlain).ch)
+        else
+            result += _current_gasket_hole_perimeter(child::_CurrentGasketHole)
+        end
+    end
+    return result
+end
+
+function _current_gasket_word(item::_CurrentGasketItem)
+    if item isa _CurrentGasketPlain
+        return string(item.ch)
+    end
+    hole = item::_CurrentGasketHole
+    return string(_current_gasket_start_char(hole.kind)) * join(_current_gasket_word(child) for child in hole.children) * "F"
+end
+
+function _count_small_current_gasket_holes(item::_CurrentGasketItem)
+    item isa _CurrentGasketPlain && return (0, 0)
+    hole = item::_CurrentGasketHole
+    size_one = 0
+    size_two = 0
+    for child in hole.children
+        child isa _CurrentGasketHole || continue
+        perimeter = _current_gasket_hole_perimeter(child)
+        if perimeter == 0
+            size_one += 1
+        elseif perimeter == 1
+            size_two += 1
+        end
+        child_one, child_two = _count_small_current_gasket_holes(child)
+        size_one += child_one
+        size_two += child_two
+    end
+    return size_one, size_two
+end
+
+function _collapse_small_current_gasket_children(item::_CurrentGasketItem)
+    if item isa _CurrentGasketPlain
+        return _CurrentGasketItem[item]
+    end
+
+    hole = item::_CurrentGasketHole
+    perimeter = _current_gasket_hole_perimeter(hole)
+    if perimeter == 0
+        return _CurrentGasketItem[]
+    elseif perimeter == 1
+        return _CurrentGasketItem[_CurrentGasketPlain(_current_gasket_order_char(hole.kind), hole.start_step)]
+    end
+
+    cleaned_children = _CurrentGasketItem[]
+    for child in hole.children
+        append!(cleaned_children, _collapse_small_current_gasket_children(child))
+    end
+    return _CurrentGasketItem[_CurrentGasketHole(hole.kind, hole.start_step, hole.end_step, cleaned_children)]
+end
+
+function _clean_current_gasket_root(root::_CurrentGasketHole)
+    cleaned_children = _CurrentGasketItem[]
+    for child in root.children
+        append!(cleaned_children, _collapse_small_current_gasket_children(child))
+    end
+    return _CurrentGasketHole(root.kind, root.start_step, root.end_step, cleaned_children)
+end
+
+function _current_gasket_boundary_order_steps(map_data::FKMap, hole::_CurrentGasketHole)
+    boundary_order = hole.kind == 'h' ? 'H' : 'C'
+    boundary_steps = Dict{Int,Char}()
+    order = sortperm(map_data.order_steps)
+    for j in order
+        order_step = Int(map_data.order_steps[j])
+        if order_step <= hole.start_step || order_step > hole.end_step
+            continue
+        end
+        if map_data.order_symbols[j] != boundary_order
+            continue
+        end
+        if Int(map_data.production_steps[j]) >= hole.start_step
+            continue
+        end
+        boundary_steps[order_step] = boundary_order
+    end
+    return boundary_steps
+end
+
+function _fresh_order_pair_map(map_data::FKMap)
+    pair_map = Dict{Int,Int}()
+    for i in eachindex(map_data.production_steps)
+        map_data.order_symbols[i] == 'F' || continue
+        pair_map[Int(map_data.production_steps[i])] = Int(map_data.order_steps[i])
+    end
+    return pair_map
+end
+
+function _clean_current_gasket_fk_span(
+    map_data::FKMap,
+    start_step::Int,
+    end_step::Int,
+    pair_map::Dict{Int,Int};
+    collapse_self::Bool=false,
+)
+    haskey(pair_map, start_step) || throw(ArgumentError("expected an FK fresh-order span starting at step $start_step"))
+    pair_map[start_step] == end_step || throw(ArgumentError("FK fresh-order span endpoints do not match the expected gasket span"))
+
+    pieces = String[]
+    pos = start_step
+    while pos <= end_step
+        if pos == start_step || pos == end_step
+            push!(pieces, string(map_data.word[pos+1]))
+            pos += 1
+            continue
+        end
+
+        child_end = get(pair_map, pos, -1)
+        if child_end != -1 && child_end <= end_step
+            push!(pieces, _clean_current_gasket_fk_span(map_data, pos, child_end, pair_map; collapse_self=true))
+            pos = child_end + 1
+        else
+            push!(pieces, string(map_data.word[pos+1]))
+            pos += 1
+        end
+    end
+
+    cleaned = join(pieces)
+    if collapse_self
+        reduced = _reduce_fk_fragment(cleaned)
+        if length(reduced) <= 1
+            return reduced
+        end
+    end
+    return cleaned
+end
+
+function _clean_current_gasket_fk_subword(map_data::FKMap, hole::_CurrentGasketHole; collapse_self::Bool=false)
+    pair_map = _fresh_order_pair_map(map_data)
+    cleaned = _clean_current_gasket_fk_span(
+        map_data,
+        hole.start_step,
+        hole.end_step,
+        pair_map;
+        collapse_self=collapse_self,
+    )
+    if collapse_self
+        reduced = _reduce_fk_fragment(cleaned)
+        if length(reduced) <= 1
+            return _reduce_fk_fragment(cleaned)
+        end
+    end
+    return cleaned
+end
+
+function _decorate_current_gasket_tree(map_data::FKMap, hole::_CurrentGasketHole)
+    hole_children = Dict{Int,_CurrentGasketHole}()
+    plain_steps = Dict{Int,_CurrentGasketPlain}()
+    for child in hole.children
+        if child isa _CurrentGasketHole
+            decorated_child = _decorate_current_gasket_tree(map_data, child)
+            hole_children[decorated_child.start_step] = decorated_child
+        else
+            plain = child::_CurrentGasketPlain
+            plain_steps[plain.step] = plain
+        end
+    end
+    boundary_steps = _current_gasket_boundary_order_steps(map_data, hole)
+
+    children = _CurrentGasketItem[]
+    pos = hole.start_step + 1
+    while pos < hole.end_step
+        child = get(hole_children, pos, nothing)
+        if child !== nothing
+            push!(children, child)
+            pos = child.end_step + 1
+            continue
+        end
+
+        plain = get(plain_steps, pos, nothing)
+        if plain !== nothing
+            push!(children, plain)
+            pos += 1
+            continue
+        end
+
+        boundary_ch = get(boundary_steps, pos, '\0')
+        if boundary_ch != '\0'
+            push!(children, _CurrentGasketPlain(boundary_ch, pos))
+            pos += 1
+            continue
+        end
+
+        pos += 1
+    end
+
+    return _CurrentGasketHole(hole.kind, hole.start_step, hole.end_step, children)
+end
+
+function _reduce_fk_fragment(word::AbstractString)
+    chars = collect(replace(String(word), r"\s+" => ""))
+    prod_symbols = Char[]
+    prev_stack = Int[]
+    next_stack = Int[]
+    prev_same = Int[]
+    top_any = -1
+    top_by_type = Dict('h' => -1, 'c' => -1)
+    unmatched_orders = Char[]
+
+    for ch in chars
+        if ch == 'h' || ch == 'c'
+            idx = length(prod_symbols)
+            push!(prod_symbols, ch)
+            push!(prev_stack, top_any)
+            push!(next_stack, -1)
+            if top_any != -1
+                next_stack[top_any+1] = idx
+            end
+            top_any = idx
+            push!(prev_same, top_by_type[ch])
+            top_by_type[ch] = idx
+            continue
+        end
+
+        target_type, idx = if ch == 'H'
+            ('h', top_by_type['h'])
+        elseif ch == 'C'
+            ('c', top_by_type['c'])
+        elseif ch == 'F'
+            top_any == -1 ? ('\0', -1) : (prod_symbols[top_any+1], top_any)
+        else
+            throw(ArgumentError("unexpected FK symbol $(repr(ch))"))
+        end
+
+        if idx == -1
+            push!(unmatched_orders, ch)
+            continue
+        end
+
+        ps = prev_stack[idx+1]
+        ns = next_stack[idx+1]
+        if ps != -1
+            next_stack[ps+1] = ns
+        end
+        if ns != -1
+            prev_stack[ns+1] = ps
+        else
+            top_any = ps
+        end
+        top_by_type[target_type] = prev_same[idx+1]
+    end
+
+    unmatched_burgers = Char[]
+    idx = top_any
+    while idx != -1 && prev_stack[idx+1] != -1
+        idx = prev_stack[idx+1]
+    end
+    while idx != -1
+        push!(unmatched_burgers, prod_symbols[idx+1])
+        idx = next_stack[idx+1]
+    end
+
+    return String(vcat(unmatched_orders, unmatched_burgers))
+end
+
+_matching_fk_production(ch::Char) = ch == 'H' ? 'h' : ch == 'C' ? 'c' : throw(ArgumentError("expected H or C in reduced FK fragment"))
+
+function _build_cleaned_fk_gasket_map(cleaned_subword::AbstractString)
+    reduced = _reduce_fk_fragment(cleaned_subword)
+    prefix = isempty(reduced) ? "" : String([_matching_fk_production(ch) for ch in reduced])
+    balanced_word = prefix * String(cleaned_subword)
+    return build_hc_map_from_word(balanced_word), reduced, balanced_word
+end
+
+function _new_gasket_layout_state(root_kind::Char)
+    root_is_hamburger = root_kind == 'c'
+    return _GasketLayoutState(
+        [_GasketLayoutVertex(!root_is_hamburger, Int32[])],
+        Int32[],
+        Int32[],
+        Int32[],
+        Int32[],
+        Int32[],
+        Int32[],
+        String[],
+        !root_is_hamburger ? Int32(0) : Int32(-1),
+        root_is_hamburger ? Int32(0) : Int32(-1),
+        Int32[],
+        Int32[],
+        Int32[],
+        Int32[],
+    )
+end
+
+function _gasket_add_vertex!(state::_GasketLayoutState, is_hamburger::Bool)
+    push!(state.vertices, _GasketLayoutVertex(is_hamburger, Int32[]))
+    return Int32(length(state.vertices) - 1)
+end
+
+_gasket_vertex_degree(state::_GasketLayoutState, v::Int32) = length(state.vertices[Int(v)+1].darts)
+
+function _gasket_add_edge!(state::_GasketLayoutState, v::Int32, w::Int32; insert_at::Int=0, boundary::Bool=false)
+    (v < 0 || w < 0 || v == w) && return Int32(-1)
+
+    kind = if boundary
+        "boundary"
+    elseif state.vertices[Int(v)+1].is_hamburger && state.vertices[Int(w)+1].is_hamburger
+        "red"
+    elseif !state.vertices[Int(v)+1].is_hamburger && !state.vertices[Int(w)+1].is_hamburger
+        "blue"
+    else
+        "green"
+    end
+
+    push!(state.edge_u, v)
+    push!(state.edge_v, w)
+    push!(state.edge_kind, kind)
+    edge_id = Int32(length(state.edge_u) - 1)
+
+    d_vw = Int32(length(state.dart_tail) + 1)
+    d_wv = Int32(length(state.dart_tail) + 2)
+    append!(state.dart_tail, [v, w])
+    append!(state.dart_head, [w, v])
+    append!(state.dart_twin, [d_wv, d_vw])
+    append!(state.dart_edge, [edge_id, edge_id])
+
+    push!(state.vertices[Int(v)+1].darts, d_vw)
+    if insert_at <= 0
+        push!(state.vertices[Int(w)+1].darts, d_wv)
+    else
+        splice!(state.vertices[Int(w)+1].darts, insert_at:insert_at-1, d_wv)
+    end
+    return edge_id
+end
+
+function _process_current_gasket_plain!(state::_GasketLayoutState, ch::Char)
+    if ch == 'h'
+        pred = state.current_v_h
+        opp = state.current_v_c
+        push!(state.prev_v_h, pred)
+        nxt = _gasket_add_vertex!(state, true)
+        _gasket_add_edge!(state, pred, nxt)
+        _gasket_add_edge!(state, opp, nxt)
+        state.current_v_h = nxt
+    elseif ch == 'c'
+        pred = state.current_v_c
+        opp = state.current_v_h
+        push!(state.prev_v_c, pred)
+        nxt = _gasket_add_vertex!(state, false)
+        _gasket_add_edge!(state, pred, nxt)
+        _gasket_add_edge!(state, opp, nxt)
+        state.current_v_c = nxt
+    elseif ch == 'H'
+        if isempty(state.prev_v_h)
+            push!(state.boundary_cycle, state.current_v_h)
+            nxt = _gasket_add_vertex!(state, true)
+            _gasket_add_edge!(state, state.current_v_h, nxt; boundary=true)
+            _gasket_add_edge!(state, state.current_v_c, nxt)
+            state.current_v_h = nxt
+        else
+            state.current_v_h = pop!(state.prev_v_h)
+            _gasket_add_edge!(state, state.current_v_c, state.current_v_h)
+        end
+    elseif ch == 'C'
+        if isempty(state.prev_v_c)
+            push!(state.boundary_cycle, state.current_v_c)
+            nxt = _gasket_add_vertex!(state, false)
+            _gasket_add_edge!(state, state.current_v_c, nxt; boundary=true)
+            _gasket_add_edge!(state, state.current_v_h, nxt)
+            state.current_v_c = nxt
+        else
+            state.current_v_c = pop!(state.prev_v_c)
+            _gasket_add_edge!(state, state.current_v_h, state.current_v_c)
+        end
+    else
+        throw(ArgumentError("unexpected gasket symbol $(repr(ch))"))
+    end
+end
+
+function _enter_current_gasket_hole!(state::_GasketLayoutState, kind::Char; is_root::Bool)
+    if kind == 'c'
+        if is_root
+            nxt = _gasket_add_vertex!(state, true)
+            _gasket_add_edge!(state, state.current_v_c, nxt)
+            state.current_v_h = nxt
+            return 1
+        end
+        push!(state.prev_v_f, state.current_v_c)
+        push!(state.prev_v_h, state.current_v_h)
+        nxt = _gasket_add_vertex!(state, true)
+        _gasket_add_edge!(state, state.current_v_c, nxt)
+        prev_deg = _gasket_vertex_degree(state, state.current_v_c)
+        state.current_v_h = nxt
+        return prev_deg
+    end
+
+    if is_root
+        nxt = _gasket_add_vertex!(state, false)
+        _gasket_add_edge!(state, state.current_v_h, nxt)
+        state.current_v_c = nxt
+        return 1
+    end
+    push!(state.prev_v_f, state.current_v_h)
+    push!(state.prev_v_c, state.current_v_c)
+    nxt = _gasket_add_vertex!(state, false)
+    _gasket_add_edge!(state, state.current_v_h, nxt)
+    prev_deg = _gasket_vertex_degree(state, state.current_v_h)
+    state.current_v_c = nxt
+    return prev_deg
+end
+
+function _leave_current_gasket_hole!(state::_GasketLayoutState, kind::Char, prev_deg::Int; is_root::Bool)
+    if kind == 'c'
+        if is_root
+            push!(state.boundary_cycle, state.current_v_c)
+            _gasket_add_edge!(state, state.current_v_c, Int32(0); boundary=true)
+            return
+        end
+        v_f = pop!(state.prev_v_f)
+        state.current_v_h = pop!(state.prev_v_h)
+        _gasket_add_edge!(state, state.current_v_c, v_f; insert_at=prev_deg)
+        _gasket_add_edge!(state, state.current_v_c, state.current_v_h)
+        return
+    end
+
+    if is_root
+        push!(state.boundary_cycle, state.current_v_h)
+        _gasket_add_edge!(state, state.current_v_h, Int32(0); boundary=true)
+        return
+    end
+    v_f = pop!(state.prev_v_f)
+    state.current_v_c = pop!(state.prev_v_c)
+    _gasket_add_edge!(state, state.current_v_h, v_f; insert_at=prev_deg)
+    _gasket_add_edge!(state, state.current_v_h, state.current_v_c)
+end
+
+function _walk_current_gasket_tree!(state::_GasketLayoutState, hole::_CurrentGasketHole; is_root::Bool=false)
+    prev_deg = _enter_current_gasket_hole!(state, hole.kind; is_root=is_root)
+    for child in hole.children
+        if child isa _CurrentGasketPlain
+            _process_current_gasket_plain!(state, child.ch)
+        else
+            _walk_current_gasket_tree!(state, child; is_root=false)
+        end
+    end
+    _leave_current_gasket_hole!(state, hole.kind, prev_deg; is_root=is_root)
+    return state
+end
+
+function _gasket_prev_darts(state::_GasketLayoutState)
+    prev_dart = fill(Int32(0), length(state.dart_tail))
+    for vertex in state.vertices
+        darts = vertex.darts
+        isempty(darts) && continue
+        for i in eachindex(darts)
+            prev_dart[Int(darts[i])] = darts[mod1(i - 1, length(darts))]
+        end
+    end
+    return prev_dart
+end
+
+function _extract_gasket_faces(state::_GasketLayoutState)
+    prev_dart = _gasket_prev_darts(state)
+    seen = falses(length(state.dart_tail))
+    faces = Vector{Vector{Int32}}()
+    face_edges = Vector{Vector{Int32}}()
+
+    for dart in eachindex(state.dart_tail)
+        seen[dart] && continue
+        face = Int32[]
+        edges = Int32[]
+        cur = dart
+        while !seen[cur]
+            seen[cur] = true
+            push!(face, state.dart_tail[cur])
+            push!(edges, state.dart_edge[cur])
+            cur = Int(prev_dart[Int(state.dart_twin[cur])])
+        end
+        push!(faces, face)
+        push!(face_edges, edges)
+    end
+
+    return faces, face_edges
+end
+
+function _select_outer_gasket_face(state::_GasketLayoutState, face_edges)
+    best_idx = 1
+    best_score = (-1, -1)
+    for (i, edges) in enumerate(face_edges)
+        boundary_count = count(e -> state.edge_kind[Int(e)+1] == "boundary", edges)
+        score = (boundary_count, length(edges))
+        if score > best_score
+            best_idx = i
+            best_score = score
+        end
+    end
+    return best_idx
+end
+
+function _face_vertices_in_order(face::Vector{Int32})
+    out = Int32[]
+    seen = Set{Int32}()
+    for v in face
+        if v in seen
+            continue
+        end
+        push!(seen, v)
+        push!(out, v)
+    end
+    return out
+end
+
+function _cleaned_current_gasket_layout(kind::Char, root::_CurrentGasketHole, boundary_color::String, fresh_color::String)
+    state = _new_gasket_layout_state(kind)
+    _walk_current_gasket_tree!(state, root; is_root=true)
+    faces, face_edges = _extract_gasket_faces(state)
+    outer_idx = _select_outer_gasket_face(state, face_edges)
+    boundary_vertices = isempty(state.boundary_cycle) ? _face_vertices_in_order(faces[outer_idx]) : copy(state.boundary_cycle)
+    interior_faces = [faces[i] for i in eachindex(faces) if i != outer_idx]
+    triangles = fan_triangulate_faces(interior_faces; drop_degenerate=true, deduplicate=false)
+
+    edge_groups = Dict{String,Matrix{Int32}}(
+        "green" => Matrix{Int32}(undef, 0, 2),
+        "red" => Matrix{Int32}(undef, 0, 2),
+        "blue" => Matrix{Int32}(undef, 0, 2),
+        "orange" => Matrix{Int32}(undef, 0, 2),
+        "purple" => Matrix{Int32}(undef, 0, 2),
+    )
+
+    cycle_pairs = Tuple{Int32,Int32}[]
+    for i in eachindex(boundary_vertices)
+        u = boundary_vertices[i]
+        v = boundary_vertices[mod1(i + 1, length(boundary_vertices))]
+        push!(cycle_pairs, (min(u, v), max(u, v)))
+    end
+    closing_pair = isempty(cycle_pairs) ? nothing : cycle_pairs[end]
+
+    grouped = Dict(
+        "green" => Tuple{Int32,Int32}[],
+        "red" => Tuple{Int32,Int32}[],
+        "blue" => Tuple{Int32,Int32}[],
+        "orange" => Tuple{Int32,Int32}[],
+        "purple" => Tuple{Int32,Int32}[],
+    )
+
+    for i in eachindex(state.edge_u)
+        u = state.edge_u[i]
+        v = state.edge_v[i]
+        pair = (min(u, v), max(u, v))
+        group = state.edge_kind[i]
+        if group == "boundary"
+            target = pair == closing_pair ? fresh_color : boundary_color
+            push!(grouped[target], pair)
+        else
+            push!(grouped[group], pair)
+        end
+    end
+
+    for (name, pairs) in grouped
+        isempty(pairs) && continue
+        arr = Matrix{Int32}(undef, length(pairs), 2)
+        for (i, (u, v)) in enumerate(pairs)
+            arr[i, 1] = u
+            arr[i, 2] = v
+        end
+        edge_groups[name] = arr
+    end
+
+    all_edges = sanitize_edge_array(reduce(vcat, [arr for arr in values(edge_groups) if size(arr, 1) > 0]; init=Matrix{Int32}(undef, 0, 2)))
+    return (
+        length(state.vertices),
+        all_edges,
+        Dict(name => arr for (name, arr) in edge_groups if size(arr, 1) > 0),
+        boundary_vertices,
+        interior_faces,
+        triangles,
+        Dict{String,Any}(
+            "gasket_cleanup_mode" => "tree_small_holes",
+            "gasket_num_vertices" => length(state.vertices),
+            "gasket_num_edges" => size(all_edges, 1),
+            "gasket_num_triangles" => size(triangles, 1),
+        ),
+    )
+end
+
+function _fk_local_euler_path(local_adj_component::Dict{Int32,Vector{Tuple{Int32,Int}}}, start::Int32, vertex::Integer)
+    wedge_ids = sort!(unique(Int[wedge_id for adjlist in values(local_adj_component) for (_, wedge_id) in adjlist]))
+    used = falses(isempty(wedge_ids) ? 0 : maximum(wedge_ids))
+    stack = Int32[start]
+    path = Int32[]
+
+    while !isempty(stack)
+        current = stack[end]
+        adjlist = get(local_adj_component, current, Tuple{Int32,Int}[])
+        while !isempty(adjlist) && used[last(adjlist)[2]]
+            pop!(adjlist)
+        end
+
+        if isempty(adjlist)
+            push!(path, current)
+            pop!(stack)
+        else
+            next_edge, wedge_id = pop!(adjlist)
+            used[wedge_id] = true
+            push!(stack, next_edge)
+        end
+    end
+
+    all(used[wedge_ids]) || throw(ArgumentError("failed to recover an FK gasket cleanup path around vertex $vertex"))
+    reverse!(path)
+    return path
+end
+
+function _fk_gasket_bubble_vertices(num_vertices::Integer, edges, boundary_vertices, triangles, triangle_edge_ids)
+    triangle_edge_ids === nothing && return Int32[]
+    n = Int(num_vertices)
+    tri = Int32.(triangles)
+    tri_edges = Int32.(triangle_edge_ids)
+    size(tri, 1) == size(tri_edges, 1) || throw(ArgumentError("triangle_edge_ids must align with FK gasket triangles"))
+
+    adjacency = [Int32[] for _ in 1:n]
+    for i in 1:size(edges, 1)
+        u = Int(edges[i, 1]) + 1
+        v = Int(edges[i, 2]) + 1
+        u == v && continue
+        push!(adjacency[u], Int32(v - 1))
+        push!(adjacency[v], Int32(u - 1))
+    end
+
+    boundary_set = Set(Int32.(boundary_vertices))
+    to_remove = Set{Int32}()
+
+    for vertex in Int32.(0:(n-1))
+        local_adj = Dict{Int32,Vector{Tuple{Int32,Int}}}()
+        local_deg = Dict{Int32,Int}()
+        local_neighbor = Dict{Int32,Int32}()
+        wedge_count = 0
+
+        function register_neighbor!(edge_id::Int32, neighbor::Int32)
+            existing = get(local_neighbor, edge_id, Int32(-1))
+            if existing != Int32(-1) && existing != neighbor
+                throw(ArgumentError("triangle_edge_ids are inconsistent with the FK gasket triangulation around vertex $vertex"))
+            end
+            local_neighbor[edge_id] = neighbor
+        end
+
+        function add_local_wedge!(left_edge::Int32, left_neighbor::Int32, right_edge::Int32, right_neighbor::Int32)
+            wedge_count += 1
+            register_neighbor!(left_edge, left_neighbor)
+            register_neighbor!(right_edge, right_neighbor)
+            push!(get!(local_adj, left_edge, Tuple{Int32,Int}[]), (right_edge, wedge_count))
+            push!(get!(local_adj, right_edge, Tuple{Int32,Int}[]), (left_edge, wedge_count))
+            local_deg[left_edge] = get(local_deg, left_edge, 0) + 1
+            local_deg[right_edge] = get(local_deg, right_edge, 0) + 1
+        end
+
+        for i in 1:size(tri, 1)
+            a = tri[i, 1]
+            b = tri[i, 2]
+            c = tri[i, 3]
+            eab = tri_edges[i, 1]
+            ebc = tri_edges[i, 2]
+            eca = tri_edges[i, 3]
+            if a == vertex
+                add_local_wedge!(eca, c, eab, b)
+            end
+            if b == vertex
+                add_local_wedge!(eab, a, ebc, c)
+            end
+            if c == vertex
+                add_local_wedge!(ebc, b, eca, a)
+            end
+        end
+
+        visited = Set{Int32}()
+        for start in keys(local_adj)
+            start in visited && continue
+            component = Int32[]
+            queue = Int32[start]
+            push!(visited, start)
+            while !isempty(queue)
+                current = popfirst!(queue)
+                push!(component, current)
+                for (next_edge, _) in get(local_adj, current, Tuple{Int32,Int}[])
+                    if !(next_edge in visited)
+                        push!(visited, next_edge)
+                        push!(queue, next_edge)
+                    end
+                end
+            end
+
+            comp_set = Set(component)
+            comp_adj = Dict{Int32,Vector{Tuple{Int32,Int}}}()
+            odd_edges = Int32[]
+            for edge_id in component
+                values = [(next_edge, wedge_id) for (next_edge, wedge_id) in get(local_adj, edge_id, Tuple{Int32,Int}[]) if next_edge in comp_set]
+                comp_adj[edge_id] = values
+                isodd(length(values)) && push!(odd_edges, edge_id)
+            end
+            length(odd_edges) == 2 || continue
+
+            shared_neighbor = local_neighbor[odd_edges[1]]
+            shared_neighbor == local_neighbor[odd_edges[2]] || continue
+
+            edge_path = _fk_local_euler_path(comp_adj, odd_edges[1], vertex)
+            order = Int32[local_neighbor[edge_id] for edge_id in edge_path]
+            seeds = Set(Int32[v for v in order[2:end-1] if v != shared_neighbor])
+            isempty(seeds) && continue
+
+            component_vertices = Set{Int32}()
+            search = Int32[collect(seeds)...]
+            valid = true
+            while !isempty(search)
+                current = popfirst!(search)
+                current in component_vertices && continue
+                if current == vertex || current == shared_neighbor
+                    continue
+                end
+                if current in boundary_set
+                    valid = false
+                    break
+                end
+                push!(component_vertices, current)
+                for next_vertex in adjacency[Int(current)+1]
+                    if next_vertex != vertex && next_vertex != shared_neighbor && !(next_vertex in component_vertices)
+                        push!(search, next_vertex)
+                    end
+                end
+            end
+
+            valid || continue
+            union!(to_remove, component_vertices)
+        end
+    end
+
+    return sort!(collect(to_remove))
+end
+
+function _fk_cleanup_reindex_edges(edge_array, removed::Set{Int32}, old_to_new)
+    arr = sanitize_edge_array(edge_array)
+    keep = [i for i in 1:size(arr, 1) if !(arr[i, 1] in removed) && !(arr[i, 2] in removed)]
+    isempty(keep) && return Matrix{Int32}(undef, 0, 2)
+    return _drop_self_loops(_reindex_edges(arr[keep, :], old_to_new; deduplicate=false))
+end
+
+function _cleanup_fk_gasket_layout_graph(num_vertices::Integer, edges, edge_groups, boundary_vertices, triangles, triangle_edge_ids)
+    triangle_edge_ids === nothing && return (
+        Int(num_vertices),
+        sanitize_edge_array(edges),
+        Dict{String,Matrix{Int32}}(string(k) => Int32.(v) for (k, v) in pairs(edge_groups)),
+        Int32.(boundary_vertices),
+        Int32.(triangles),
+        nothing,
+        Dict{String,Any}(
+            "gasket_removed_bubble_vertices" => 0,
+            "gasket_removed_bubble_rounds" => 0,
+        ),
+    )
+
+    current_n = Int(num_vertices)
+    current_edges = sanitize_edge_array(edges)
+    current_edge_groups = Dict{String,Matrix{Int32}}(string(k) => sanitize_edge_array(v) for (k, v) in pairs(edge_groups))
+    current_boundary = Int32.(boundary_vertices)
+    current_triangles = Int32.(triangles)
+    current_triangle_edge_ids = Int32.(triangle_edge_ids)
+
+    removed_total = Set{Int32}()
+    rounds = 0
+
+    while true
+        removed_vertices = _fk_gasket_bubble_vertices(
+            current_n,
+            current_edges,
+            current_boundary,
+            current_triangles,
+            current_triangle_edge_ids,
+        )
+        isempty(removed_vertices) && break
+        rounds += 1
+        union!(removed_total, removed_vertices)
+        removed_set = Set(removed_vertices)
+
+        keep_vertices = Int32[v for v in 0:(current_n-1) if !(Int32(v) in removed_set)]
+        old_to_new = Dict(Int(v) => i - 1 for (i, v) in enumerate(keep_vertices))
+
+        current_edges = _fk_cleanup_reindex_edges(current_edges, removed_set, old_to_new)
+
+        next_groups = Dict{String,Matrix{Int32}}()
+        for (name, arr) in current_edge_groups
+            remapped = _fk_cleanup_reindex_edges(arr, removed_set, old_to_new)
+            size(remapped, 1) > 0 && (next_groups[name] = remapped)
+        end
+        current_edge_groups = next_groups
+
+        keep_triangles = [i for i in 1:size(current_triangles, 1) if !(current_triangles[i, 1] in removed_set) && !(current_triangles[i, 2] in removed_set) && !(current_triangles[i, 3] in removed_set)]
+        current_triangle_edge_ids = current_triangle_edge_ids[keep_triangles, :]
+        current_triangles = _reindex_triangles(current_triangles[keep_triangles, :], old_to_new; deduplicate=false)
+        current_boundary = Int32[old_to_new[Int(v)] for v in current_boundary if !(v in removed_set)]
+        current_n = length(keep_vertices)
+    end
+
+    return (
+        current_n,
+        current_edges,
+        current_edge_groups,
+        current_boundary,
+        current_triangles,
+        current_triangle_edge_ids,
+        Dict{String,Any}(
+            "gasket_removed_bubble_vertices" => length(removed_total),
+            "gasket_removed_bubble_rounds" => rounds,
+            "gasket_geometric_cleanup" => rounds > 0,
+            "gasket_num_vertices" => current_n,
+            "gasket_num_edges" => size(current_edges, 1),
+            "gasket_num_collapsed_edges" => size(_deduplicate_undirected_edges(current_edges), 1),
+            "gasket_num_triangles" => size(current_triangles, 1),
+            "gasket_num_collapsed_triangles" => size(sanitize_triangles(current_triangles; drop_degenerate=true, deduplicate=true), 1),
+        ),
+    )
 end
 
 function _first_simple_face(faces, target_size::Integer)
@@ -236,9 +1337,13 @@ function _hc_gasket_boundary(map_data::FKMap, gasket::AbstractString)
     )
 end
 
-function _hc_gasket_subgraph(map_data::FKMap, gasket::AbstractString)
+function _hc_gasket_subgraph_raw(map_data::FKMap, gasket::AbstractString; metadata_override=nothing)
     kind, prod_idx, start_step, end_step, _, boundary_color, fresh_color = _hc_gasket_selection(map_data, gasket)
     boundary_vertices_old, meta = _hc_gasket_boundary(map_data, gasket)
+    metadata_override === nothing || merge!(meta, metadata_override)
+
+    root_tree = _build_current_gasket_tree(map_data, kind[1], start_step, end_step)
+    get!(meta, "gasket_tree_word", _current_gasket_word(root_tree))
 
     keep_steps = [s for s in start_step:end_step if s != Int(map_data.order_face[prod_idx+1])]
     tri_faces_all = Int32.(map_data.triangulation_faces)
@@ -249,7 +1354,20 @@ function _hc_gasket_subgraph(map_data::FKMap, gasket::AbstractString)
     selected_green = tri_green_all[keep_steps.+1, :]
     selected_diag = tri_diag_all[keep_steps.+1]
 
-    edge_ids = unique(Int32[v for v in vcat(vec(selected_green), selected_diag) if v >= 0])
+    valid_triangle_rows, drop_edge_ids = _gasket_cleanup_mask(
+        map_data,
+        selected_triangles_old,
+        selected_green,
+        selected_diag,
+    )
+    raw_triangle_count = size(selected_triangles_old, 1)
+    raw_edge_ids = unique(Int32[v for v in vcat(vec(selected_green), selected_diag) if v >= 0])
+
+    selected_triangles_old = selected_triangles_old[valid_triangle_rows, :]
+    selected_green = selected_green[valid_triangle_rows, :]
+    selected_diag = selected_diag[valid_triangle_rows]
+
+    edge_ids = Int32[e for e in unique(Int32[v for v in vcat(vec(selected_green), selected_diag) if v >= 0]) if !(e in drop_edge_ids)]
     edge_u = map_data.edge_u
     edge_v = map_data.edge_v
     edge_color = Int32.(map_data.edge_color)
@@ -262,7 +1380,7 @@ function _hc_gasket_subgraph(map_data::FKMap, gasket::AbstractString)
     )
     old_to_new = Dict(Int(v) => i - 1 for (i, v) in enumerate(original_vertices))
 
-    triangles = _reindex_triangles(selected_triangles_old, old_to_new)
+    triangles = _reindex_triangles(selected_triangles_old, old_to_new; deduplicate=false)
     boundary_vertices = Int32[old_to_new[Int(v)] for v in boundary_vertices_old]
 
     edge_groups = Dict{String,Matrix{Int32}}()
@@ -271,7 +1389,7 @@ function _hc_gasket_subgraph(map_data::FKMap, gasket::AbstractString)
         mask = edge_color[edge_ids.+1] .== color_id
         any(mask) || continue
         pairs_old = hcat(edge_u[edge_ids[mask].+1], edge_v[edge_ids[mask].+1])
-        pairs_new = _reindex_edges(pairs_old, old_to_new)
+        pairs_new = _drop_self_loops(_reindex_edges(pairs_old, old_to_new; deduplicate=false))
         if size(pairs_new, 1) > 0
             edge_groups[name] = pairs_new
         end
@@ -280,32 +1398,108 @@ function _hc_gasket_subgraph(map_data::FKMap, gasket::AbstractString)
     all_edges = if isempty(edge_groups)
         Matrix{Int32}(undef, 0, 2)
     else
-        _deduplicate_undirected_edges(reduce(vcat, collect(values(edge_groups))))
+        sanitize_edge_array(reduce(vcat, collect(values(edge_groups))))
     end
 
     meta["boundary_mode"] = "$(kind)_gasket"
     meta["gasket_removed_exterior_triangle_step"] = Int(map_data.order_face[prod_idx+1])
     meta["gasket_original_vertex_ids"] = Int.(original_vertices)
     meta["gasket_num_vertices"] = length(original_vertices)
+    meta["gasket_num_raw_edges"] = length(raw_edge_ids)
     meta["gasket_num_edges"] = size(all_edges, 1)
+    meta["gasket_removed_degenerate_triangles"] = raw_triangle_count - size(selected_triangles_old, 1)
+    meta["gasket_removed_degenerate_edges"] = length(raw_edge_ids) - length(edge_ids)
+    meta["gasket_num_collapsed_edges"] = size(_deduplicate_undirected_edges(all_edges), 1)
+    meta["gasket_num_raw_triangles"] = raw_triangle_count
+    meta["gasket_num_triangles"] = size(triangles, 1)
+    meta["gasket_num_collapsed_triangles"] = size(sanitize_triangles(triangles; drop_degenerate=true, deduplicate=true), 1)
+    get!(meta, "gasket_clean_tree_word", meta["gasket_tree_word"])
     meta["gasket_boundary_vertex_color"] = boundary_color
     meta["gasket_boundary_edge_colors"] = [boundary_color, fresh_color]
 
-    return length(original_vertices), all_edges, edge_groups, boundary_vertices, triangles, meta
+    triangle_edge_ids = _triangle_side_edge_ids(selected_triangles_old, selected_green, selected_diag, edge_u, edge_v)
+
+    return length(original_vertices), all_edges, edge_groups, boundary_vertices, triangles, triangle_edge_ids, meta
+end
+
+function _hc_gasket_subgraph(map_data::FKMap, gasket::AbstractString)
+    kind, _, start_step, end_step, _, _, _ = _hc_gasket_selection(map_data, gasket)
+    root_tree = _build_current_gasket_tree(map_data, kind[1], start_step, end_step)
+    small_size_one, small_size_two = _count_small_current_gasket_holes(root_tree)
+    raw_subword = map_data.word[start_step+1:end_step+1]
+    cleaned_subword = _clean_current_gasket_fk_subword(map_data, root_tree)
+
+    if small_size_one + small_size_two > 0 || cleaned_subword != raw_subword
+        cleaned_tree = _clean_current_gasket_root(root_tree)
+        decorated_tree = _decorate_current_gasket_tree(map_data, cleaned_tree)
+        metadata_override = Dict{String,Any}(
+            "gasket_tree_word" => _current_gasket_word(root_tree),
+            "gasket_removed_size1_holes" => small_size_one,
+            "gasket_removed_size2_holes" => small_size_two,
+            "gasket_clean_tree_word" => _current_gasket_word(cleaned_tree),
+            "gasket_clean_decorated_tree_word" => _current_gasket_word(decorated_tree),
+            "gasket_clean_fk_word" => cleaned_subword,
+        )
+        try
+            cleaned_map, reduced, balanced_word = _build_cleaned_fk_gasket_map(cleaned_subword)
+            metadata_override["gasket_clean_reduced_word"] = reduced
+            metadata_override["gasket_clean_balanced_word"] = balanced_word
+            metadata_override["gasket_cleanup_mode"] = "fk_word_small_holes"
+            metadata_override["gasket_boundary_follows_clean_word"] = true
+            return _hc_gasket_subgraph_raw(cleaned_map, gasket; metadata_override=metadata_override)
+        catch err
+            metadata_override["gasket_clean_word_error"] = sprint(showerror, err)
+            metadata_override["gasket_clean_word_fallback"] = true
+            try
+                nverts, gasket_edges, gasket_edge_groups, boundary_vertices, _, triangles, extra = _cleaned_current_gasket_layout(
+                    kind[1],
+                    decorated_tree,
+                    kind == "h" ? "red" : "blue",
+                    kind == "h" ? "orange" : "purple",
+                )
+                if length(boundary_vertices) >= 3 && size(triangles, 1) > 0
+                    merge!(metadata_override, extra)
+                    metadata_override["boundary_mode"] = "$(kind)_gasket"
+                    metadata_override["gasket_boundary_vertex_color"] = kind == "h" ? "red" : "blue"
+                    metadata_override["gasket_boundary_edge_colors"] = kind == "h" ? ["red", "orange"] : ["blue", "purple"]
+                    metadata_override["gasket_boundary_follows_clean_tree"] = true
+                    metadata_override["gasket_original_vertex_ids"] = Int[]
+                    metadata_override["gasket_num_collapsed_edges"] = size(_deduplicate_undirected_edges(gasket_edges), 1)
+                    metadata_override["gasket_num_collapsed_triangles"] = size(sanitize_triangles(triangles; drop_degenerate=true, deduplicate=true), 1)
+                    get!(metadata_override, "gasket_tree_word", _current_gasket_word(root_tree))
+                    return nverts, gasket_edges, gasket_edge_groups, boundary_vertices, triangles, nothing, metadata_override
+                end
+            catch tree_err
+                metadata_override["gasket_clean_tree_error"] = sprint(showerror, tree_err)
+            end
+            metadata_override["gasket_clean_tree_fallback"] = true
+            return _hc_gasket_subgraph_raw(map_data, gasket; metadata_override=metadata_override)
+        end
+    end
+
+    metadata_override = Dict{String,Any}(
+        "gasket_removed_size1_holes" => 0,
+        "gasket_removed_size2_holes" => 0,
+    )
+    return _hc_gasket_subgraph_raw(map_data, gasket; metadata_override=metadata_override)
 end
 
 function _prepare_hc_problem(map_data::FKMap; dimension::Int, boundary_scale::Float64, hc_boundary_mode=nothing)
-    edges = layout_edges(map_data; drop_loops=true)
+    edges = active_edge_pairs(map_data; collapse=false, drop_loops=true)
     edge_groups = _edge_groups_for_map(map_data)
     map_variant = _hc_variant(map_data)
     metadata = Dict{String,Any}("model" => "fk", "dimension" => dimension, "variant" => map_variant)
+    metadata["layout_num_edges"] = size(edges, 1)
+    metadata["layout_num_collapsed_edges"] = size(first(collapse_undirected_edges(edges; drop_loops=true)), 1)
 
     if dimension == 3
+        surface_triangles, surface_triangle_edge_ids = _surface_triangle_data(map_data)
         return LayoutProblem(
             num_vertices=num_vertices(map_data),
             edges=edges,
             edge_groups=edge_groups,
-            surface_triangles=sanitize_triangles(map_data.triangulation_faces; drop_degenerate=true, deduplicate=true),
+            surface_triangles=surface_triangles,
+            surface_triangle_edge_ids=surface_triangle_edge_ids,
             metadata=metadata,
             render_map_data=map_data,
         )
@@ -314,8 +1508,11 @@ function _prepare_hc_problem(map_data::FKMap; dimension::Int, boundary_scale::Fl
     boundary_mode = lowercase(strip(string(something(hc_boundary_mode, map_variant == "spanning_tree" ? "face" : "h_gasket"))))
 
     if boundary_mode in ("h", "c", "h_gasket", "c_gasket")
-        nverts, gasket_edges, gasket_edge_groups, boundary_vertices, triangles, extra = _hc_gasket_subgraph(map_data, boundary_mode)
+        nverts, gasket_edges, gasket_edge_groups, boundary_vertices, triangles, triangle_edge_ids, extra = _hc_gasket_subgraph(map_data, boundary_mode)
+        nverts, gasket_edges, gasket_edge_groups, boundary_vertices, triangles, triangle_edge_ids, cleanup_extra =
+            _cleanup_fk_gasket_layout_graph(nverts, gasket_edges, gasket_edge_groups, boundary_vertices, triangles, triangle_edge_ids)
         merge!(metadata, extra)
+        merge!(metadata, cleanup_extra)
         boundary_positions = length(boundary_vertices) >= 3 ? nothing : _regular_polygon(length(boundary_vertices), max(boundary_scale, 1.0))
         if boundary_positions !== nothing
             metadata["gasket_boundary_fallback"] = "regular_polygon"
@@ -327,12 +1524,13 @@ function _prepare_hc_problem(map_data::FKMap; dimension::Int, boundary_scale::Fl
             boundary_vertices=boundary_vertices,
             boundary_positions=boundary_positions,
             surface_triangles=triangles,
+            surface_triangle_edge_ids=triangle_edge_ids,
             metadata=metadata,
             render_map_data=nothing,
         )
     end
 
-    tri_faces = sanitize_triangles(map_data.triangulation_faces; drop_degenerate=true, deduplicate=true)
+    tri_faces, triangle_edge_ids = _surface_triangle_data(map_data)
     choice = _first_simple_face(tri_faces, 3)
     choice === nothing && throw(ArgumentError("failed to find a simple FK triangular face for 2D boundary conditions"))
     idx, boundary = choice
@@ -344,6 +1542,7 @@ function _prepare_hc_problem(map_data::FKMap; dimension::Int, boundary_scale::Fl
         keep = trues(size(tri_faces, 1))
         keep[idx+1] = false
         tri_faces = tri_faces[keep, :]
+        triangle_edge_ids = triangle_edge_ids[keep, :]
     end
 
     metadata["boundary_mode"] = "face"
@@ -357,6 +1556,7 @@ function _prepare_hc_problem(map_data::FKMap; dimension::Int, boundary_scale::Fl
         boundary_vertices=boundary_vertices,
         boundary_positions=boundary_positions,
         surface_triangles=tri_faces,
+        surface_triangle_edge_ids=triangle_edge_ids,
         metadata=metadata,
         render_map_data=map_data,
     )

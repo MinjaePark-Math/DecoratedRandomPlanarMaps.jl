@@ -13,6 +13,7 @@ Thumbs.db
 *.jl.*.cov
 *.jl.mem
 /Manifest.toml
+julia_depot
 
 # IDEs and Editors
 .vscode/
@@ -20,7 +21,6 @@ Thumbs.db
 *.swp
 
 # Package-specific generated outputs
-examples/
 examples/out/
 exports/
 *.bin

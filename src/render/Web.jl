@@ -40,7 +40,8 @@ end
 _display_edge_group_name(name::AbstractString) = string(name)
 
 function _edge_group_default_visible(name::AbstractString)
-    return name == "exploration" ? false : true
+    name in ("exploration", "tree_upper", "tree_lower", "glue_upper", "glue_lower") && return false
+    return true
 end
 
 function _merge_metadata_preserving_generated!(meta_dict::Dict{String,Any}, metadata)
@@ -70,6 +71,7 @@ function export_web_binaries(
     edge_groups=nothing,
     faces=nothing,
     triangles=nothing,
+    circle_radii=nothing,
     metadata=nothing,
     write_index_html::Bool=true,
 )
@@ -81,6 +83,14 @@ function export_web_binaries(
     input_dim = size(pos_arr, 2)
     input_dim in (2, 3) || throw(ArgumentError("positions must have shape (N, 2) or (N, 3)"))
     _write_vertex_positions(joinpath(out_path, "data_verts.bin"), pos_arr)
+
+    radii_file = nothing
+    if circle_radii !== nothing
+        radii = Float32.(collect(circle_radii))
+        length(radii) == size(pos_arr, 1) || throw(ArgumentError("circle_radii must have length equal to the number of vertices"))
+        radii_file = "data_radii.bin"
+        _write_binary(joinpath(out_path, radii_file), radii)
+    end
 
     tri_array = surface_triangles(map_data; faces=faces, triangles=triangles, drop_degenerate=true, deduplicate=true)
     face_file = nothing
@@ -136,6 +146,7 @@ function export_web_binaries(
         "vertices" => "data_verts.bin",
         "faces" => face_file,
         "exploration" => exploration_file,
+        "circle_radii" => radii_file,
     )
 
     param_pairs = _web_parameter_dict(map_data, metadata)

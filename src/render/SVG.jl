@@ -105,6 +105,7 @@ function export_svg_preview(
     edge_groups=nothing,
     faces=nothing,
     triangles=nothing,
+    circle_radii=nothing,
     show_faces=nothing,
     show_vertices::Bool=false,
     title=nothing,
@@ -121,6 +122,14 @@ function export_svg_preview(
     for i in axes(safe_pos2, 1)
         validmask[i] && continue
         safe_pos2[i, :] .= 0
+    end
+
+    radii = if circle_radii === nothing
+        nothing
+    else
+        arr = Float64.(collect(circle_radii))
+        length(arr) == size(pos2, 1) || throw(ArgumentError("circle_radii must have length equal to the number of vertices"))
+        arr
     end
 
     scale, tx, ty = _svg_transform_spec(pos2)
@@ -148,6 +157,19 @@ function export_svg_preview(
             for i in 1:size(tri, 1)
                 a, b, c = Int.(tri[i, :]) .+ 1
                 println(io, """<polygon points=\"$(screen[a,1]),$(screen[a,2]) $(screen[b,1]),$(screen[b,2]) $(screen[c,1]),$(screen[c,2])\"/>""")
+            end
+            println(io, "</g>")
+        end
+
+        if radii !== nothing
+            outline_width = size(pos2, 1) > 50_000 ? 0.25 : 0.8
+            println(io, """<g fill=\"#f59e0b\" fill-opacity=\"0.08\" stroke=\"#d97706\" stroke-width=\"$outline_width\" stroke-opacity=\"0.45\">""")
+            println(io, """<circle cx=\"$tx\" cy=\"$ty\" r=\"$scale\" fill=\"none\" stroke=\"#111827\" stroke-width=\"$(outline_width * 1.4)\" stroke-opacity=\"0.55\"/>""")
+            for i in 1:size(screen, 1)
+                validmask[i] || continue
+                radius_px = scale * radii[i]
+                (isfinite(radius_px) && radius_px > 0.0) || continue
+                println(io, """<circle cx=\"$(screen[i,1])\" cy=\"$(screen[i,2])\" r=\"$radius_px\"/>""")
             end
             println(io, "</g>")
         end

@@ -6,7 +6,7 @@ It provides a streamlined programmatic pipeline for exploring random geometry:
 
   - Generate a map from a chosen model
   - Construct a model-specific layout problem
-  - Compute a 2D (Tutte) or 3D (SFDP) layout
+  - Compute a 2D (Tutte/circle-packing) or 3D (SFDP) layout
   - Export or render the final geometry
 
 The codebase is highly optimized for scale and speed. For example, computing the layout of a uniform quadrangulation with 500,000 faces takes approximately 5 minutes on a standard desktop machine.
@@ -30,10 +30,16 @@ The package currently supports four families of decorated random planar maps:
 **Note on FK Sampling Limitations:**
 With the exception of the spanning tree case (`p = 0`), FK-decorated maps are not sampled exactly. Instead, they are approximated using a Markov Chain Monte Carlo (MCMC) algorithm. Users should be aware that the accuracy of this approximation currently degrades for larger values of `p`.
 
+## Supported Layout Engines
+
+- `tutte` — 2D harmonic embedding with fixed boundary vertices
+- `circle_packing` — 2D circle packing for triangulated disk layout problems; it records both circle centers and radii so SVG, web, and Makie previews can draw the circles directly
+- `sfdp` — 3D embedding via Graphviz `sfdp` when available, with a built-in force-layout fallback when Graphviz is not installed
+
 **Future Implementations:**
+- `mated_crt`— Mated-CRT (continuum-random-tree) maps
 - `bipolar` — Bipolar-orientation-decorated maps
-- `meandric` — Random geometry of meanders or meandric systems
-- Circle-packing layouts
+- `meandric` — Random geometry of meanders or meandric systems, including half-plane and uniform variants
 
 **Feature Requests & Collaboration:**
 I am open to implementing additional models and layout algorithms. Please feel free to [reach out via email](mailto:minjaep@auburn.edu) for assistance, feature requests, or research collaboration.
@@ -66,10 +72,10 @@ Pkg.add(url="https://github.com/MinjaePark-Math/DecoratedRandomPlanarMaps.jl")
 
 **System Requirements**
 
-- [Graphviz](https://graphviz.org/) is required to compute 3D layouts using the SFDP engine. Please ensure it is installed and accessible in your system's `PATH`.
+- [Graphviz](https://graphviz.org/) is recommended for fast 3D layouts with the SFDP engine. If it is not installed or not available on `PATH`, the package falls back to a built-in `O(n^2)` force layout, which can be much slower on large examples.
 
 **Optional Dependencies (Rendering)**
-To enable the built-in Makie visualizers (`render_makie_2d` and `render_makie_3d`), you must also install `GLMakie` and `GeometryBasics` in your current environment. The package will automatically load its rendering extension when these are present.
+To enable the built-in Makie visualizers (`render_makie_2d` and `render_makie_3d`), you must also install `GLMakie` and `GeometryBasics` in your current environment. The package will automatically load its rendering extension when these are present, including when `run_pipeline(..., output.show = true)` opens a viewer.
 
 ```julia
 using Pkg
@@ -80,7 +86,7 @@ Pkg.add(["GLMakie", "GeometryBasics"])
 
 - `src/core` — shared interfaces, half-edge storage, sparse graph helpers, samplers, timings
 - `src/models` — uniform, Schnyder, and FK / spanning-tree constructions
-- `src/layout` — model-specific layout-problem preparation, Tutte, and SFDP
+- `src/layout` — model-specific layout-problem preparation, Tutte, circle packing, and SFDP
 - `src/render` — common geometry helpers, web export, SVG preview, STL export
 - `ext` — optional GLMakie renderer extension
 - `src/Pipeline.jl` — YAML/dict-driven end-to-end pipeline helpers
@@ -91,28 +97,32 @@ Pkg.add(["GLMakie", "GeometryBasics"])
 ```julia
 using DecoratedRandomPlanarMaps
 
-map_data = build_fk_map(; faces=400, p=0.25, seed=11)
-problem = prepare_layout_problem(map_data; dimension=2, options=Dict("hc_boundary_mode" => "h_gasket"))
+map_data = generate_schnyder_map(; size_faces=200, seed=7)
+problem = prepare_layout_problem(map_data; dimension=2)
 
-pos, meta = compute_tutte_layout(
+pos, radii, meta = compute_circle_packing_layout(
     problem.num_vertices,
     problem.edges,
     problem.boundary_vertices;
-    boundary_positions=problem.boundary_positions,
-    solver="auto",
+    triangles=problem.surface_triangles,
+    triangle_edge_ids=problem.surface_triangle_edge_ids,
+    maxiter=120,
     return_metadata=true,
 )
 
-export_web_binaries(
+export_svg_preview(
     problem.render_map_data,
     pos,
-    "exports/fk_h_gasket";
+    "exports/schnyder_circle_packing.svg";
     edge_groups=problem.edge_groups,
     faces=problem.faces,
     triangles=problem.surface_triangles,
+    circle_radii=radii,
     metadata=merge(problem.metadata, meta),
 )
 ```
+
+For Tutte embeddings, call `compute_tutte_layout(...)` instead and omit `circle_radii`.
 
 ## Optional Makie rendering
 
@@ -169,6 +179,8 @@ Use the `examples/` directory for copy-pasteable workflows:
 - `examples/schnyder_examples.jl`
 - `examples/fk_examples.jl`
 - `examples/spanning_tree_examples.jl`
+- `examples/circle_packing.jl`
+- `examples/demo.jl`
 
 Each example contains all relevant export blocks already written out:
 

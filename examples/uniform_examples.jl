@@ -10,7 +10,7 @@ end
 # Comment out any block you do not want.
 # Optional Makie blocks are already commented out at the bottom.
 
-faces = 10000
+faces = 2000
 seed = 71
 outroot = joinpath(@__DIR__, "out", "uniform")
 mkpath(outroot)
@@ -93,8 +93,8 @@ end
 # ------------------------------------------------------------------
 # Optional Makie
 # ------------------------------------------------------------------
-using GLMakie
-using GeometryBasics
+# using GLMakie
+# using GeometryBasics
 # render_makie_2d(
 #     problem2.render_map_data,
 #     pos2;
@@ -103,11 +103,11 @@ using GeometryBasics
 #     triangles=problem2.surface_triangles,
 #     metadata=meta2,
 # )
-render_makie_3d(
-    problem3.render_map_data,
-    pos3;
-    edge_groups=problem3.edge_groups,
-    faces=problem3.faces,
-    triangles=problem3.surface_triangles,
-    metadata=meta3,
-)
+# render_makie_3d(
+#     problem3.render_map_data,
+#     pos3;
+#     edge_groups=problem3.edge_groups,
+#     faces=problem3.faces,
+#     triangles=problem3.surface_triangles,
+#     metadata=meta3,
+# )

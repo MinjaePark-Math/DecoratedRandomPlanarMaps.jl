@@ -1,6 +1,6 @@
 name = "DecoratedRandomPlanarMaps"
 uuid = "4530f583-3fb5-4466-8c96-73bae2706f33"
-version = "0.5.0"
+version = "0.6.0"
 authors = ["Minjae Park"]
 
 [deps]
@@ -19,11 +19,12 @@ GeometryBasics = "5c1252a2-5f33-56bf-86c9-59e7332b4326"
 DecoratedRandomPlanarMapsMakieExt = ["GLMakie", "GeometryBasics"]
 
 [compat]
-JSON3 = "1"
-YAML = "0.4"
-GeometryBasics = "0.5"
-Statistics = "1"
 GLMakie = "0.13"
+GeometryBasics = "0.5"
+JSON3 = "1"
+Statistics = "1"
+YAML = "0.4"
+julia = "1.12"
 
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"

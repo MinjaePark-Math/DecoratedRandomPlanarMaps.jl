@@ -10,7 +10,7 @@ end
 # Comment out any block you do not want.
 # For spanning-tree maps the default 2D boundary mode is `face`.
 
-faces = 10000
+faces = 2000
 seed = 17
 outroot = joinpath(@__DIR__, "out", "spanning_tree")
 mkpath(outroot)
@@ -83,8 +83,8 @@ timed_step(() -> export_stl_binary(map_data, pos3 .* 100.0, joinpath(outroot, "s
 # ------------------------------------------------------------------
 # Optional Makie
 # ------------------------------------------------------------------
-using GLMakie
-using GeometryBasics
+# using GLMakie
+# using GeometryBasics
 # render_makie_2d(
 #     problem2.render_map_data,
 #     pos2;
@@ -93,11 +93,11 @@ using GeometryBasics
 #     triangles=problem2.surface_triangles,
 #     metadata=meta2,
 # )
-render_makie_3d(
-    problem3.render_map_data,
-    pos3;
-    edge_groups=problem3.edge_groups,
-    faces=problem3.faces,
-    triangles=problem3.surface_triangles,
-    metadata=meta3,
-)
+# render_makie_3d(
+#     problem3.render_map_data,
+#     pos3;
+#     edge_groups=problem3.edge_groups,
+#     faces=problem3.faces,
+#     triangles=problem3.surface_triangles,
+#     metadata=meta3,
+# )

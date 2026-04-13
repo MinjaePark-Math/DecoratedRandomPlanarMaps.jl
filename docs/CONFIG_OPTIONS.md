@@ -38,12 +38,15 @@ Common keys:
 
 2D keys:
 
-- `engine`: currently `tutte`
+- `engine`: `tutte` or `circle_packing`
 - `solver`: `auto`, `direct`, `spsolve`, or `cg`
-- `tol`: iterative tolerance for `cg`
+- `tol`: iterative tolerance for `cg` or convergence tolerance for circle packing
 - `maxiter`: optional max iteration count
 - `radius`: optional boundary radius override
 - `source_vertex`: optional harmonic-measure source vertex
+- `relaxation`: optional circle-packing radius relaxation factor
+- `initial_radius`: optional circle-packing starting radius
+- `min_radius`: optional lower clamp for circle-packing radii
 
 3D keys:
 
@@ -65,11 +68,11 @@ Common keys:
 - `export_stl`: path for STL export (3D only)
 - `preview_svg`: path for a 2D SVG preview
 - `preview_web`: folder for a 3D preview web export
-- `show`: whether to emit the default preview export
+- `show`: whether to open the default preview viewer
 - `timings_json`: optional JSON file for timing output
 - `web_scale`: export scaling for web
 - `stl_scale`: export scaling for STL
-- `show_scale`: preview scaling
+- `show_scale`: preview scaling for the viewer, and for `preview_svg` when set
 
 ## Minimal examples
 
@@ -110,6 +113,23 @@ layout:
 output:
   export_web: ./exports/fk_h_gasket
   preview_svg: ./exports/fk_h_gasket/preview.svg
+```
+
+### Schnyder 2D circle packing
+
+```yaml
+model:
+  type: schnyder
+  faces: 200
+  seed: 7
+
+layout:
+  dimension: 2
+  engine: circle_packing
+  maxiter: 100
+
+output:
+  preview_svg: ./exports/schnyder_circle_packing.svg
 ```
 
 

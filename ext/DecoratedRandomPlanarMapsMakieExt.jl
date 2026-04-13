@@ -39,6 +39,21 @@ function _as_points_3d(pos::AbstractMatrix)
     return [Point3f(pos3[i, 1], pos3[i, 2], pos3[i, 3]) for i in axes(pos3, 1)]
 end
 
+function _circle_geometries(points, circle_radii, validmask::AbstractVector{Bool})
+    circle_radii === nothing && return GeometryBasics.Circle[]
+    radii = Float32.(collect(circle_radii))
+    length(radii) == length(points) || throw(ArgumentError("circle_radii must have length equal to the number of vertices"))
+
+    circles = GeometryBasics.Circle[]
+    for i in eachindex(points)
+        validmask[i] || continue
+        radii[i] > 0 || continue
+        isfinite(radii[i]) || continue
+        push!(circles, Circle(points[i], radii[i]))
+    end
+    return circles
+end
+
 function _triangle_faces(triangles)
     tri = DRPM.sanitize_triangles(triangles; drop_degenerate=true, deduplicate=true)
     out = TriangleFace{Int}[]
@@ -314,7 +329,7 @@ function DecoratedRandomPlanarMaps.render_makie_3d(map_data, pos; edge_groups=no
     return fig
 end
 
-function DecoratedRandomPlanarMaps.render_makie_2d(map_data, pos; edge_groups=nothing, faces=nothing, triangles=nothing, metadata=nothing, title::AbstractString="2D map")
+function DecoratedRandomPlanarMaps.render_makie_2d(map_data, pos; edge_groups=nothing, faces=nothing, triangles=nothing, circle_radii=nothing, metadata=nothing, title::AbstractString="2D map")
     size(pos, 2) == 2 || throw(ArgumentError("render_makie_2d expects a position matrix with two columns"))
     points, tri, groups, expl_points, validmask = _geometry(map_data, pos; edge_groups=edge_groups, faces=faces, triangles=triangles, metadata=metadata, dim=2)
     family = _family(map_data, groups; metadata=metadata)
@@ -331,6 +346,9 @@ function DecoratedRandomPlanarMaps.render_makie_2d(map_data, pos; edge_groups=no
     for key in group_keys
         push!(entries, key => key)
     end
+    if circle_radii !== nothing
+        push!(entries, "__circles__" => "circles")
+    end
     if DRPM.should_include_exploration(map_data; edge_groups=groups, metadata=metadata)
         push!(entries, "__exploration__" => "exploration")
     end
@@ -342,6 +360,23 @@ function DecoratedRandomPlanarMaps.render_makie_2d(map_data, pos; edge_groups=no
         mesh!(ax, mesh_obj; color=_mesh_color(alpha.value), visible=mesh_toggle.active, shading=NoShading, transparency=true)
     else
         mesh_toggle.active[] = false
+    end
+
+    if haskey(group_toggles, "__circles__")
+        circles = _circle_geometries(points, circle_radii, validmask)
+        if isempty(circles)
+            group_toggles["__circles__"].active[] = false
+        else
+            circle_plot = poly!(
+                ax,
+                circles;
+                color=RGBAf(0.96f0, 0.62f0, 0.08f0, 0.08f0),
+                strokecolor=RGBAf(0.85f0, 0.47f0, 0.0f0, 0.55f0),
+                strokewidth=0.8,
+                visible=group_toggles["__circles__"].active,
+            )
+            translate!(circle_plot, 0, 0, 0.5)
+        end
     end
 
     for name in group_keys

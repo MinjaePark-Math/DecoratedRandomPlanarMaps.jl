@@ -9,7 +9,7 @@ end
 
 # Comment out any block you do not want.
 
-faces = 10000
+faces = 1000
 seed = 17
 outroot = joinpath(@__DIR__, "out", "schnyder")
 mkpath(outroot)
@@ -25,14 +25,12 @@ end
 problem2 = timed_step("prepare_2d") do
     prepare_layout_problem(map_data; dimension=2)
 end
+
 pos2, layout2_meta = timed_step("layout_2d") do
-    compute_tutte_layout(
+    compute_circle_packing_layout(
         problem2.num_vertices,
         problem2.edges,
-        problem2.boundary_vertices;
-        boundary_positions=problem2.boundary_positions,
-        solver="auto",
-        return_metadata=true,
+        problem2.boundary_vertices
     )
 end
 meta2 = merge(meta_base, problem2.metadata, layout2_meta)
@@ -50,58 +48,58 @@ timed_step("export_svg") do
     )
 end
 
-timed_step("export_web") do
-    export_web_binaries(
-        problem2.render_map_data,
-        pos2,
-        joinpath(outroot, "schnyder_2d_web");
-        edge_groups=problem2.edge_groups,
-        faces=problem2.faces,
-        triangles=problem2.surface_triangles,
-        metadata=meta2,
-    )
-end
+# timed_step("export_web") do
+#     export_web_binaries(
+#         problem2.render_map_data,
+#         pos2,
+#         joinpath(outroot, "schnyder_2d_web");
+#         edge_groups=problem2.edge_groups,
+#         faces=problem2.faces,
+#         triangles=problem2.surface_triangles,
+#         metadata=meta2,
+#     )
+# end
 
 # ------------------------------------------------------------------
 # 3D SFDP layout
 # ------------------------------------------------------------------
-problem3 = timed_step("prepare_3d") do
-    prepare_layout_problem(map_data; dimension=3)
-end
-pos3 = timed_step("layout_3d") do
-    compute_sfdp_layout(problem3.num_vertices, problem3.edges; scale=1.0, seed=seed)
-end
-meta3 = merge(meta_base, problem3.metadata)
+# problem3 = timed_step("prepare_3d") do
+#     prepare_layout_problem(map_data; dimension=3)
+# end
+# pos3 = timed_step("layout_3d") do
+#     compute_sfdp_layout(problem3.num_vertices, problem3.edges; scale=1.0, seed=seed)
+# end
+# meta3 = merge(meta_base, problem3.metadata)
 
-timed_step("export_web_3d") do
-    export_web_binaries(
-        problem3.render_map_data,
-        pos3 .* 10.0,
-        joinpath(outroot, "schnyder_3d_web");
-        edge_groups=problem3.edge_groups,
-        faces=problem3.faces,
-        triangles=problem3.surface_triangles,
-        metadata=meta3,
-    )
-end
+# timed_step("export_web_3d") do
+#     export_web_binaries(
+#         problem3.render_map_data,
+#         pos3 .* 10.0,
+#         joinpath(outroot, "schnyder_3d_web");
+#         edge_groups=problem3.edge_groups,
+#         faces=problem3.faces,
+#         triangles=problem3.surface_triangles,
+#         metadata=meta3,
+#     )
+# end
 
-timed_step("export_stl") do
-    export_stl_binary(map_data, pos3 .* 100.0, joinpath(outroot, "schnyder_3d.stl"))
-end
+# timed_step("export_stl") do
+#     export_stl_binary(map_data, pos3 .* 100.0, joinpath(outroot, "schnyder_3d.stl"))
+# end
 
 # ------------------------------------------------------------------
 # Optional Makie
 # ------------------------------------------------------------------
-# using GLMakie
-# using GeometryBasics
-# render_makie_2d(
-#     problem2.render_map_data,
-#     pos2;
-#     edge_groups=problem2.edge_groups,
-#     faces=problem2.faces,
-#     triangles=problem2.surface_triangles,
-#     metadata=meta2,
-# )
+using GLMakie
+using GeometryBasics
+render_makie_2d(
+    problem2.render_map_data,
+    pos2;
+    edge_groups=problem2.edge_groups,
+    faces=problem2.faces,
+    triangles=problem2.surface_triangles,
+    metadata=meta2,
+)
 # render_makie_3d(
 #     problem3.render_map_data,
 #     pos3;
