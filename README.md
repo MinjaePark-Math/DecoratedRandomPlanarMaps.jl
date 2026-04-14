@@ -1,5 +1,7 @@
 # DecoratedRandomPlanarMaps.jl
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19582541.svg)](https://doi.org/10.5281/zenodo.19582541)
+
 `DecoratedRandomPlanarMaps.jl` is a high-performance Julia package for sampling decorated random planar maps, computing 2D or 3D layouts, and exporting results for web visualization, publication (SVG), or 3D printing (STL).
 
 It provides a streamlined programmatic pipeline for exploring random geometry:
@@ -29,18 +31,18 @@ The codebase is highly optimized for scale and speed. For example, computing the
 
 ## Citation
 
-If you use `DecoratedRandomPlanarMaps.jl` in your research or course materials, please cite it. A formal paper is currently in preparation. In the meantime, please cite the repository directly:
+If you use `DecoratedRandomPlanarMaps.jl` in your research or course materials, please cite it. A formal paper is currently in preparation. In the meantime, please cite the Zenodo archive:
 
-> Park, M. (2026). *DecoratedRandomPlanarMaps.jl: A Julia package for sampling and rendering decorated random planar maps*. GitHub repository. [https://github.com/MinjaePark-Math/DecoratedRandomPlanarMaps.jl](https://github.com/MinjaePark-Math/DecoratedRandomPlanarMaps.jl)
+> Park, M. (2026). *DecoratedRandomPlanarMaps.jl: A Julia package for sampling and rendering decorated random planar maps* [Computer software]. Zenodo. [https://doi.org/10.5281/zenodo.19582541](https://doi.org/10.5281/zenodo.19582541)
 
 ```bibtex
 @misc{Park_DecoratedRandomPlanarMaps_2026,
   author = {Park, Minjae},
   title = {DecoratedRandomPlanarMaps.jl: A Julia package for sampling and rendering decorated random planar maps},
   year = {2026},
-  publisher = {GitHub},
-  journal = {GitHub repository},
-  howpublished = {\url{https://github.com/MinjaePark-Math/DecoratedRandomPlanarMaps.jl}}
+  publisher = {Zenodo},
+  doi = {10.5281/zenodo.19582541},
+  url = {https://doi.org/10.5281/zenodo.19582541}
 }
 ```
 
