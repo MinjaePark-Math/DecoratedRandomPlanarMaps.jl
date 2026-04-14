@@ -19,6 +19,14 @@ The codebase is highly optimized for scale and speed. For example, computing the
   </a>
 </p>
 
+[![Live Demo](https://img.shields.io/badge/Live_Demo-aub.ie%2Frandcp-blue.svg)](https://aub.ie/randcp)
+
+<p align="center">
+  <a href="https://aub.ie/randcp">
+    <img src="assets/circle_packing.png" alt="Circle Packed spanning-tree-decorated Random Planar Map" width="600">
+  </a>
+</p>
+
 ## Citation
 
 If you use `DecoratedRandomPlanarMaps.jl` in your research or course materials, please cite it. A formal paper is currently in preparation. In the meantime, please cite the repository directly:
