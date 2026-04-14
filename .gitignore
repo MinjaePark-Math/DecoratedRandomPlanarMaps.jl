@@ -19,6 +19,7 @@ julia_depot
 .vscode/
 .idea/
 *.swp
+tmp*
 
 # Package-specific generated outputs
 examples/out/
@@ -27,3 +28,4 @@ exports/
 *.stl
 *.svg
 web_meta.json
+demo/

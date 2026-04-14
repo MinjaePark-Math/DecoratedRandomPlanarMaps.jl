@@ -60,8 +60,21 @@
   <script type="module">
     import * as THREE from 'three';
     import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { Line2 } from 'three/addons/lines/Line2.js';
+    import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
+    import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
+    import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
+    import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 
-    const FACE_COLOR = 0xFFF6BF;
+    const FACE_COLOR = 0xe4e7ec;
+    const SPHERE_COLOR = 0xfbfcfe;
+    const SECTION_COLOR = 0xfff4b8;
+    const CIRCLE_COLOR = 0xfff4b8;
+    const CIRCLE_STROKE_COLOR = 0xf4c430;
+    const SPHERE_SHELL_SCALE = 0.99;
+    const SPHERE_CAP_SCALE = 0.996;
+    const SPHERE_CIRCLE_SCALE = 1.0015;
+    const SPHERE_EDGE_SCALE = 1.006;
 
     const app = document.getElementById('app');
     const summary = document.getElementById('summary');
@@ -72,6 +85,7 @@
 
     const meta = await (await fetch('web_meta.json')).json();
     const is2D = meta.dimension === 2;
+    const sphereProjection = !is2D && meta.sphere_projection === 'inverse_stereographic';
 
     let camera;
     if (is2D) {
@@ -86,6 +100,7 @@
     renderer.setPixelRatio(window.devicePixelRatio || 1);
     renderer.setSize(window.innerWidth, window.innerHeight);
     app.appendChild(renderer.domElement);
+    const wideLineMaterials = [];
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
@@ -159,6 +174,32 @@
       return out;
     }
 
+    function collectFiniteXYZWithRadii(flatXYZ, radii) {
+      const out = [];
+      const n = Math.min(radii.length, Math.floor(flatXYZ.length / 3));
+      for (let i = 0; i < n; ++i) {
+        const offset = 3 * i;
+        if (!isFiniteXYZAt(flatXYZ, offset)) {
+          continue;
+        }
+        const r = radii[i];
+        if (!Number.isFinite(r) || r <= 0) {
+          out.push(flatXYZ[offset + 0], flatXYZ[offset + 1], flatXYZ[offset + 2]);
+          continue;
+        }
+        const x = flatXYZ[offset + 0];
+        const y = flatXYZ[offset + 1];
+        const z = flatXYZ[offset + 2];
+        out.push(
+          x - r, y, z,
+          x + r, y, z,
+          x, y - r, z,
+          x, y + r, z,
+        );
+      }
+      return out;
+    }
+
     function filterTriangleIndices(indices, vertsXYZ) {
       const out = [];
       for (let i = 0; i + 2 < indices.length; i += 3) {
@@ -214,6 +255,436 @@
       return new Float32Array(out);
     }
 
+    function mergeFloat32Arrays(...arrays) {
+      const total = arrays.reduce((sum, arr) => sum + (arr ? arr.length : 0), 0);
+      const out = new Float32Array(total);
+      let offset = 0;
+      for (const arr of arrays) {
+        if (!arr || !arr.length) {
+          continue;
+        }
+        out.set(arr, offset);
+        offset += arr.length;
+      }
+      return out;
+    }
+
+    function inferSphereRadius(flatXYZ) {
+      let acc = 0;
+      let count = 0;
+      for (let i = 0; i + 2 < flatXYZ.length; i += 3) {
+        if (!isFiniteXYZAt(flatXYZ, i)) {
+          continue;
+        }
+        const x = flatXYZ[i + 0];
+        const y = flatXYZ[i + 1];
+        const z = flatXYZ[i + 2];
+        const norm = Math.hypot(x, y, z);
+        if (!Number.isFinite(norm) || norm <= 0) {
+          continue;
+        }
+        acc += norm;
+        count += 1;
+      }
+      return count ? acc / count : 1.0;
+    }
+
+    function normalizeVec3(x, y, z, fallback = [1, 0, 0]) {
+      const len = Math.hypot(x, y, z);
+      if (!Number.isFinite(len) || len <= 0) {
+        return fallback.slice();
+      }
+      return [x / len, y / len, z / len];
+    }
+
+    function normalizePolylineToSphere(flatXYZ, sphereRadius, radialScale = 1.0) {
+      const out = new Float32Array(flatXYZ.length);
+      for (let i = 0; i + 2 < flatXYZ.length; i += 3) {
+        const x = flatXYZ[i + 0];
+        const y = flatXYZ[i + 1];
+        const z = flatXYZ[i + 2];
+        const n = Math.hypot(x, y, z);
+        if (!Number.isFinite(n) || n <= 0) {
+          out[i + 0] = x;
+          out[i + 1] = y;
+          out[i + 2] = z;
+          continue;
+        }
+        const scale = (radialScale * sphereRadius) / n;
+        out[i + 0] = x * scale;
+        out[i + 1] = y * scale;
+        out[i + 2] = z * scale;
+      }
+      return out;
+    }
+
+    function buildRingSegmentPositions(center, normal, radius, segments = 128, sphereRadius = null, radialScale = 1.0) {
+      const n = normalizeVec3(normal[0], normal[1], normal[2], [0, 0, 1]);
+      const ref = Math.abs(n[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0];
+      let ux = n[1] * ref[2] - n[2] * ref[1];
+      let uy = n[2] * ref[0] - n[0] * ref[2];
+      let uz = n[0] * ref[1] - n[1] * ref[0];
+      [ux, uy, uz] = normalizeVec3(ux, uy, uz, [1, 0, 0]);
+      const vx = n[1] * uz - n[2] * uy;
+      const vy = n[2] * ux - n[0] * uz;
+      const vz = n[0] * uy - n[1] * ux;
+
+      const out = [];
+      let prev = null;
+      for (let i = 0; i <= segments; ++i) {
+        const theta = (2 * Math.PI * i) / segments;
+        const px = center[0] + radius * (Math.cos(theta) * ux + Math.sin(theta) * vx);
+        const py = center[1] + radius * (Math.cos(theta) * uy + Math.sin(theta) * vy);
+        const pz = center[2] + radius * (Math.cos(theta) * uz + Math.sin(theta) * vz);
+        const [nx, ny, nz] = normalizeVec3(px, py, pz, [0, 0, 1]);
+        const targetRadius = sphereRadius ?? Math.hypot(px, py, pz);
+        const point = [radialScale * targetRadius * nx, radialScale * targetRadius * ny, radialScale * targetRadius * nz];
+        if (prev) {
+          out.push(prev[0], prev[1], prev[2], point[0], point[1], point[2]);
+        }
+        prev = point;
+      }
+      return new Float32Array(out);
+    }
+
+    function createSegmentLines(positions, color, {
+      wide = false,
+      linewidth = 3.0,
+      depthTest = true,
+      opacity = 1.0,
+      transparent = false,
+    } = {}) {
+      if (wide) {
+        const geometry = new LineSegmentsGeometry();
+        geometry.setPositions(positions);
+        const material = new LineMaterial({
+          color,
+          linewidth,
+          transparent,
+          opacity,
+          depthTest,
+          depthWrite: false,
+          worldUnits: false,
+          alphaToCoverage: true,
+        });
+        material.resolution.set(window.innerWidth, window.innerHeight);
+        wideLineMaterials.push(material);
+        return new LineSegments2(geometry, material);
+      }
+
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      const material = new THREE.LineBasicMaterial({
+        color,
+        depthTest,
+        transparent,
+        opacity,
+      });
+      return new THREE.LineSegments(geometry, material);
+    }
+
+    function createPolylineLine(positions, color, {
+      linewidth = 3.0,
+      depthTest = true,
+      opacity = 1.0,
+      transparent = false,
+      closed = false,
+    } = {}) {
+      const data = closed ? mergeFloat32Arrays(positions, positions.slice(0, 3)) : positions;
+      const geometry = new LineGeometry();
+      geometry.setPositions(data);
+      const material = new LineMaterial({
+        color,
+        linewidth,
+        transparent,
+        opacity,
+        depthTest,
+        depthWrite: false,
+        worldUnits: false,
+        alphaToCoverage: true,
+      });
+      material.resolution.set(window.innerWidth, window.innerHeight);
+      wideLineMaterials.push(material);
+      return new Line2(geometry, material);
+    }
+
+    function slerpUnit(a, b, t) {
+      let dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+      dot = Math.max(-1.0, Math.min(1.0, dot));
+      if (dot < -0.9995) {
+        const lin = normalizeVec3(
+          (1 - t) * a[0] + t * b[0],
+          (1 - t) * a[1] + t * b[1],
+          (1 - t) * a[2] + t * b[2],
+          a,
+        );
+        return lin;
+      }
+      if (dot > 0.9995) {
+        return normalizeVec3(
+          (1 - t) * a[0] + t * b[0],
+          (1 - t) * a[1] + t * b[1],
+          (1 - t) * a[2] + t * b[2],
+          a,
+        );
+      }
+      const omega = Math.acos(dot);
+      const sinOmega = Math.sin(omega);
+      const w0 = Math.sin((1 - t) * omega) / sinOmega;
+      const w1 = Math.sin(t * omega) / sinOmega;
+      return [
+        w0 * a[0] + w1 * b[0],
+        w0 * a[1] + w1 * b[1],
+        w0 * a[2] + w1 * b[2],
+      ];
+    }
+
+    function buildGeodesicEdgeArcPositions(indices, vertsXYZ, sphereRadius, segments = 20, radialScale = 1.0) {
+      const out = [];
+      for (let i = 0; i + 1 < indices.length; i += 2) {
+        const a = indices[i + 0];
+        const b = indices[i + 1];
+        const ia = 3 * a;
+        const ib = 3 * b;
+        if (ia + 2 >= vertsXYZ.length || ib + 2 >= vertsXYZ.length) {
+          continue;
+        }
+        if (!isFiniteXYZAt(vertsXYZ, ia) || !isFiniteXYZAt(vertsXYZ, ib)) {
+          continue;
+        }
+        const ua = normalizeVec3(vertsXYZ[ia + 0], vertsXYZ[ia + 1], vertsXYZ[ia + 2], [1, 0, 0]);
+        const ub = normalizeVec3(vertsXYZ[ib + 0], vertsXYZ[ib + 1], vertsXYZ[ib + 2], [1, 0, 0]);
+        let prev = [radialScale * sphereRadius * ua[0], radialScale * sphereRadius * ua[1], radialScale * sphereRadius * ua[2]];
+        for (let j = 1; j <= segments; ++j) {
+          const t = j / segments;
+          const u = slerpUnit(ua, ub, t);
+          const current = [radialScale * sphereRadius * u[0], radialScale * sphereRadius * u[1], radialScale * sphereRadius * u[2]];
+          out.push(prev[0], prev[1], prev[2], current[0], current[1], current[2]);
+          prev = current;
+        }
+      }
+      return new Float32Array(out);
+    }
+
+    function buildIndexedEdgeArcPositions(indices, vertsXYZ, sphereRadius, segments = 28, radialScale = 1.0) {
+      return buildGeodesicEdgeArcPositions(indices, vertsXYZ, sphereRadius, segments, radialScale);
+    }
+
+    function buildPositionSegmentArcPositions(flatXYZ, sphereRadius, segments = 28, radialScale = 1.0) {
+      const out = [];
+      for (let i = 0; i + 5 < flatXYZ.length; i += 6) {
+        const ax = flatXYZ[i + 0];
+        const ay = flatXYZ[i + 1];
+        const az = flatXYZ[i + 2];
+        const bx = flatXYZ[i + 3];
+        const by = flatXYZ[i + 4];
+        const bz = flatXYZ[i + 5];
+        if (![ax, ay, az, bx, by, bz].every(Number.isFinite)) {
+          continue;
+        }
+        const ua = normalizeVec3(ax, ay, az, [1, 0, 0]);
+        const ub = normalizeVec3(bx, by, bz, ua);
+        let prev = [radialScale * sphereRadius * ua[0], radialScale * sphereRadius * ua[1], radialScale * sphereRadius * ua[2]];
+        for (let j = 1; j <= segments; ++j) {
+          const t = j / segments;
+          const u = slerpUnit(ua, ub, t);
+          const current = [radialScale * sphereRadius * u[0], radialScale * sphereRadius * u[1], radialScale * sphereRadius * u[2]];
+          out.push(prev[0], prev[1], prev[2], current[0], current[1], current[2]);
+          prev = current;
+        }
+      }
+      return new Float32Array(out);
+    }
+
+    function buildSphereCenterVerticesFromCaps(sphereCircleCaps, sphereRadius, projectionScale, expectedCount = null, outerIndex = null, fallbackVerts = null) {
+      if (!sphereCircleCaps || sphereCircleCaps.length < 8 || !Number.isFinite(sphereRadius) || sphereRadius <= 0) {
+        return null;
+      }
+      const out = [];
+      const capCount = Math.floor(sphereCircleCaps.length / 8);
+      for (let i = 0; i + 7 < sphereCircleCaps.length; i += 8) {
+        const nx = sphereCircleCaps[i + 3];
+        const ny = sphereCircleCaps[i + 4];
+        const nz = sphereCircleCaps[i + 5];
+        if (![nx, ny, nz].every(Number.isFinite)) {
+          out.push(NaN, NaN, NaN);
+          continue;
+        }
+        const n = normalizeVec3(nx, ny, nz, [0, 0, 1]);
+        const vertexScale = (outerIndex !== null && (i / 8) === outerIndex) ? -sphereRadius : sphereRadius;
+        out.push(vertexScale * n[0], vertexScale * n[1], vertexScale * n[2]);
+      }
+      if (fallbackVerts && outerIndex !== null) {
+        const base = 3 * outerIndex;
+        if (base + 2 < fallbackVerts.length && base + 2 < out.length && isFiniteXYZAt(fallbackVerts, base)) {
+          out[base + 0] = fallbackVerts[base + 0];
+          out[base + 1] = fallbackVerts[base + 1];
+          out[base + 2] = fallbackVerts[base + 2];
+        }
+      }
+      if (expectedCount !== null && expectedCount > 0 && capCount + 1 === expectedCount) {
+        const outerCircle = sphereOuterCircleDataFromMeta(meta, sphereRadius, projectionScale);
+        out.push(
+          -sphereRadius * outerCircle.normal[0],
+          -sphereRadius * outerCircle.normal[1],
+          -sphereRadius * outerCircle.normal[2],
+        );
+      }
+      return new Float32Array(out);
+    }
+
+    function buildSphereCircleSegmentsFromCaps(sphereCircleCaps, sphereRadius, radialScale = 1.0) {
+      if (!sphereCircleCaps || sphereCircleCaps.length < 8 || !Number.isFinite(sphereRadius) || sphereRadius <= 0) {
+        return new Float32Array(0);
+      }
+      const chunks = [];
+      for (let i = 0; i + 7 < sphereCircleCaps.length; i += 8) {
+        const center = [sphereCircleCaps[i + 0], sphereCircleCaps[i + 1], sphereCircleCaps[i + 2]];
+        const normal = [sphereCircleCaps[i + 3], sphereCircleCaps[i + 4], sphereCircleCaps[i + 5]];
+        const radius = sphereCircleCaps[i + 6];
+        if (![...center, ...normal, radius].every(Number.isFinite) || radius <= 0) {
+          continue;
+        }
+        chunks.push(buildRingSegmentPositions(center, normal, radius, 128, sphereRadius, radialScale));
+      }
+      return mergeFloat32Arrays(...chunks);
+    }
+
+    function buildSphereCirclePathsFromCaps(sphereCircleCaps, sphereRadius, radialScale = 1.0) {
+      if (!sphereCircleCaps || sphereCircleCaps.length < 8 || !Number.isFinite(sphereRadius) || sphereRadius <= 0) {
+        return [];
+      }
+      const paths = [];
+      for (let i = 0; i + 7 < sphereCircleCaps.length; i += 8) {
+        const center = [sphereCircleCaps[i + 0], sphereCircleCaps[i + 1], sphereCircleCaps[i + 2]];
+        const normal = [sphereCircleCaps[i + 3], sphereCircleCaps[i + 4], sphereCircleCaps[i + 5]];
+        const radius = sphereCircleCaps[i + 6];
+        if (![...center, ...normal, radius].every(Number.isFinite) || radius <= 0) {
+          continue;
+        }
+        const n = normalizeVec3(normal[0], normal[1], normal[2], [0, 0, 1]);
+        const ref = Math.abs(n[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0];
+        let ux = n[1] * ref[2] - n[2] * ref[1];
+        let uy = n[2] * ref[0] - n[0] * ref[2];
+        let uz = n[0] * ref[1] - n[1] * ref[0];
+        [ux, uy, uz] = normalizeVec3(ux, uy, uz, [1, 0, 0]);
+        const vx = n[1] * uz - n[2] * uy;
+        const vy = n[2] * ux - n[0] * uz;
+        const vz = n[0] * uy - n[1] * ux;
+
+        const pts = [];
+        for (let j = 0; j < 192; ++j) {
+          const theta = (2 * Math.PI * j) / 192;
+          const px = center[0] + radius * (Math.cos(theta) * ux + Math.sin(theta) * vx);
+          const py = center[1] + radius * (Math.cos(theta) * uy + Math.sin(theta) * vy);
+          const pz = center[2] + radius * (Math.cos(theta) * uz + Math.sin(theta) * vz);
+          const [nx, ny, nz] = normalizeVec3(px, py, pz, [0, 0, 1]);
+          pts.push(radialScale * sphereRadius * nx, radialScale * sphereRadius * ny, radialScale * sphereRadius * nz);
+        }
+        paths.push(new Float32Array(pts));
+      }
+      return paths;
+    }
+
+    function buildSphereCapSurfaceGeometry(axis, angularRadius, sphereRadius, thetaSegments = 128, radialSegments = 64, radialScale = 1.0) {
+      if (!Number.isFinite(angularRadius) || angularRadius <= 1.0e-6) {
+        return new THREE.BufferGeometry();
+      }
+      const n = normalizeVec3(axis[0], axis[1], axis[2], [0, 0, 1]);
+      const geometry = new THREE.SphereGeometry(
+        radialScale * sphereRadius,
+        thetaSegments,
+        radialSegments,
+        0,
+        2 * Math.PI,
+        0,
+        Math.min(Math.PI, angularRadius),
+      );
+      const from = new THREE.Vector3(0, 1, 0);
+      const to = new THREE.Vector3(n[0], n[1], n[2]);
+      const q = new THREE.Quaternion().setFromUnitVectors(from, to);
+      geometry.applyQuaternion(q);
+      return geometry;
+    }
+
+    function outerSphereCircleData(sphereRadius, projectionScale = 1.0) {
+      const a = Number.isFinite(projectionScale) && projectionScale > 0 ? projectionScale : 1.0;
+      const offset = (a * a - 1.0) / (a * a + 1.0);
+      const radius = sphereRadius * (2.0 * a / (a * a + 1.0));
+      return {
+        center: [0, 0, sphereRadius * offset],
+        normal: [0, 0, 1],
+        radius,
+        offset,
+        angularRadius: Math.acos(Math.max(-1.0, Math.min(1.0, offset))),
+      };
+    }
+
+    function sphereOuterCircleDataFromMeta(meta, sphereRadius, projectionScale = 1.0) {
+      const raw = meta?.sphere_outer_circle_geometry;
+      if (raw) {
+        const center = Array.isArray(raw.center)
+          ? raw.center
+          : (Array.isArray(raw.centers) && raw.centers.length > 0 ? raw.centers[0] : null);
+        const normal = Array.isArray(raw.normal)
+          ? raw.normal
+          : (Array.isArray(raw.normals) && raw.normals.length > 0 ? raw.normals[0] : null);
+        const radius = Array.isArray(raw.radius)
+          ? raw.radius[0]
+          : (Array.isArray(raw.radii) ? raw.radii[0] : raw.radius);
+        const offset = Array.isArray(raw.offset)
+          ? raw.offset[0]
+          : (Array.isArray(raw.offsets) ? raw.offsets[0] : raw.offset);
+        if (
+          Array.isArray(center) && center.length >= 3 &&
+          Array.isArray(normal) && normal.length >= 3 &&
+          [center[0], center[1], center[2], normal[0], normal[1], normal[2], radius, offset].every(Number.isFinite)
+        ) {
+          return {
+            center: [center[0], center[1], center[2]],
+            normal: normalizeVec3(normal[0], normal[1], normal[2], [0, 0, 1]),
+            radius,
+            offset,
+            angularRadius: Math.acos(Math.max(-1.0, Math.min(1.0, offset))),
+          };
+        }
+      }
+      return outerSphereCircleData(sphereRadius, projectionScale);
+    }
+
+    function complementarySphereCap(circle) {
+      const offset = Number.isFinite(circle?.offset)
+        ? Math.max(-1.0, Math.min(1.0, circle.offset))
+        : Math.cos(Math.max(0.0, Math.min(Math.PI, Number(circle?.angularRadius ?? (0.5 * Math.PI)))));
+      return {
+        normal: [-circle.normal[0], -circle.normal[1], -circle.normal[2]],
+        angularRadius: Math.PI - Math.acos(offset),
+      };
+    }
+
+    function orientCapTowardPoint(normal, offset, point, sphereRadius) {
+      if (!Array.isArray(point) || point.length < 3 || !point.every(Number.isFinite) || !Number.isFinite(sphereRadius) || sphereRadius <= 0) {
+        return {
+          normal,
+          angularRadius: Math.acos(Math.max(-1.0, Math.min(1.0, offset))),
+        };
+      }
+      const n = normalizeVec3(normal[0], normal[1], normal[2], [0, 0, 1]);
+      const p = normalizeVec3(point[0], point[1], point[2], [0, 0, 1]);
+      const clampedOffset = Math.max(-1.0, Math.min(1.0, offset));
+      const contained = (n[0] * p[0] + n[1] * p[1] + n[2] * p[2]) >= (clampedOffset - 1.0e-8);
+      if (contained) {
+        return {
+          normal: n,
+          angularRadius: Math.acos(clampedOffset),
+        };
+      }
+      return {
+        normal: [-n[0], -n[1], -n[2]],
+        angularRadius: Math.PI - Math.acos(clampedOffset),
+      };
+    }
+
     function fitPerspectiveCamera(flatPointsXYZ) {
       const box = new THREE.Box3().setFromArray(flatPointsXYZ);
       const sphere = box.getBoundingSphere(new THREE.Sphere());
@@ -255,7 +726,56 @@
 
     const rawVerts = await fetchArray(meta.files.vertices ?? 'data_verts.bin', Float32Array);
     const verts = expandFlatToXYZ(rawVerts, meta.dimension);
-    const finitePoints = collectFiniteXYZ(verts);
+    const radiiFile = meta.files?.circle_radii;
+    const circleRadii = radiiFile ? await fetchArray(radiiFile, Float32Array) : null;
+    const sphereCircleCapsFile = meta.files?.sphere_circle_caps;
+    const sphereCircleCaps = (!is2D && sphereCircleCapsFile) ? await fetchArray(sphereCircleCapsFile, Float32Array) : null;
+    const inferredSphereRadius = !is2D ? inferSphereRadius(verts) : null;
+    const sphereRadius = sphereProjection
+      ? (() => {
+          if (Number.isFinite(inferredSphereRadius) && inferredSphereRadius > 0) {
+            return inferredSphereRadius;
+          }
+          const raw = Number(meta.sphere_radius);
+          return (Number.isFinite(raw) && raw > 0) ? raw : inferSphereRadius(verts);
+        })()
+      : null;
+    const sphereProjectionScale = sphereProjection
+      ? (() => {
+          const raw = Number(meta.sphere_effective_projection_scale ?? meta.sphere_projection_scale);
+          return (Number.isFinite(raw) && raw > 0) ? raw : 1.0;
+        })()
+      : 1.0;
+    const sphereCircleIncludesOuter = !!meta.sphere_circle_geometry_includes_outer;
+    const sphereCircleOuterIndex = (sphereCircleIncludesOuter && Number.isInteger(meta.circle_packing_render_outer_vertex))
+      ? Number(meta.circle_packing_render_outer_vertex)
+      : null;
+    const sphereEdgeVerts = (sphereProjection && sphereRadius)
+      ? (() => {
+          const capCenters = buildSphereCenterVerticesFromCaps(
+            sphereCircleCaps,
+            sphereRadius,
+            sphereProjectionScale,
+            Math.floor(verts.length / 3),
+            sphereCircleOuterIndex,
+            verts,
+          );
+          return (capCenters && capCenters.length === verts.length) ? capCenters : verts;
+        })()
+      : verts;
+    const sphereCircleOverlay = (!is2D && sphereProjection) ? new THREE.Group() : null;
+    const finitePoints = sphereProjection
+      ? [
+          -sphereRadius, 0, 0,
+          sphereRadius, 0, 0,
+          0, -sphereRadius, 0,
+          0, sphereRadius, 0,
+          0, 0, -sphereRadius,
+          0, 0, sphereRadius,
+        ]
+      : (is2D && circleRadii)
+        ? collectFiniteXYZWithRadii(verts, circleRadii)
+        : collectFiniteXYZ(verts);
     const points = finitePoints.length ? finitePoints : [0, 0, 0];
 
     if (is2D) {
@@ -264,8 +784,67 @@
       fitPerspectiveCamera(points);
     }
 
+    if (sphereProjection && sphereRadius) {
+      const sphereGeometry = new THREE.SphereGeometry(sphereRadius * SPHERE_SHELL_SCALE, 96, 64);
+      const sphereMaterial = new THREE.MeshPhongMaterial({
+        color: SPHERE_COLOR,
+        transparent: true,
+        opacity: 0.08,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      });
+      const sphereMesh = new THREE.Mesh(sphereGeometry, sphereMaterial);
+      sphereMesh.renderOrder = -10;
+      scene.add(sphereMesh);
+      addLegendToggle('sphere', sphereMesh, '#e5e7eb', false);
+
+      if (sphereCircleCaps && sphereCircleCaps.length >= 8 && sphereCircleOverlay) {
+        const sectionMaterial = new THREE.MeshBasicMaterial({
+          color: SECTION_COLOR,
+          transparent: true,
+          opacity: 0.24,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+          depthTest: true,
+          polygonOffset: true,
+          polygonOffsetFactor: -2,
+          polygonOffsetUnits: -4,
+        });
+
+        for (let i = 0; i + 7 < sphereCircleCaps.length; i += 8) {
+          const normal = [sphereCircleCaps[i + 3], sphereCircleCaps[i + 4], sphereCircleCaps[i + 5]];
+          const offset = sphereCircleCaps[i + 7];
+          if (!Number.isFinite(offset)) {
+            continue;
+          }
+          const capIndex = i / 8;
+          const base = 3 * capIndex;
+          const capPoint = (base + 2 < verts.length && isFiniteXYZAt(verts, base))
+            ? [verts[base + 0], verts[base + 1], verts[base + 2]]
+            : null;
+          const oriented = orientCapTowardPoint(normal, offset, capPoint, sphereRadius);
+          const axis = oriented.normal;
+          const angularRadius = oriented.angularRadius;
+          const cap = new THREE.Mesh(buildSphereCapSurfaceGeometry(axis, angularRadius, sphereRadius, 128, 64, SPHERE_CAP_SCALE), sectionMaterial.clone());
+          cap.renderOrder = -5;
+          sphereCircleOverlay.add(cap);
+        }
+
+        if (!sphereCircleIncludesOuter) {
+          const outerCircle = sphereOuterCircleDataFromMeta(meta, sphereRadius, sphereProjectionScale);
+          const outerCapData = complementarySphereCap(outerCircle);
+          const outerCap = new THREE.Mesh(
+            buildSphereCapSurfaceGeometry(outerCapData.normal, outerCapData.angularRadius, sphereRadius, 128, 64, SPHERE_CAP_SCALE),
+            sectionMaterial.clone(),
+          );
+          outerCap.renderOrder = -5;
+          sphereCircleOverlay.add(outerCap);
+        }
+      }
+    }
+
     const faceFile = meta.files?.faces;
-    if (faceFile) {
+    if (faceFile && !sphereProjection) {
       const faces = await fetchArray(faceFile, Uint32Array);
       const filteredFaces = filterTriangleIndices(faces, verts);
       if (filteredFaces.length) {
@@ -280,7 +859,7 @@
           ? new THREE.MeshBasicMaterial({
               color: FACE_COLOR,
               transparent: true,
-              opacity: 0.24,
+              opacity: 0.3,
               side: THREE.DoubleSide,
               depthWrite: false,
             })
@@ -296,7 +875,66 @@
           mesh.renderOrder = 0;
         }
         scene.add(mesh);
-        addLegendToggle('faces', mesh, '#fff6bf', !is2D);
+        addLegendToggle('faces', mesh, '#e4e7ec', is2D ? false : !sphereProjection);
+      }
+    }
+
+    if (is2D && circleRadii && circleRadii.length) {
+      const unitCircle = new THREE.CircleGeometry(1.0, 64);
+      const material = new THREE.MeshBasicMaterial({
+        color: CIRCLE_COLOR,
+        transparent: true,
+        opacity: 0.42,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      });
+      const circles = new THREE.InstancedMesh(unitCircle, material, circleRadii.length);
+      circles.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      circles.renderOrder = 1;
+
+      const matrix = new THREE.Matrix4();
+      const position = new THREE.Vector3();
+      const quaternion = new THREE.Quaternion();
+      const scale = new THREE.Vector3();
+
+      let visibleCount = 0;
+      for (let i = 0; i < circleRadii.length; ++i) {
+        const offset = 3 * i;
+        const r = circleRadii[i];
+        if (offset + 2 >= verts.length || !Number.isFinite(r) || r <= 0 || !isFiniteXYZAt(verts, offset)) {
+          continue;
+        }
+        position.set(verts[offset + 0], verts[offset + 1], verts[offset + 2]);
+        scale.set(r, r, 1.0);
+        matrix.compose(position, quaternion, scale);
+        circles.setMatrixAt(visibleCount, matrix);
+        visibleCount += 1;
+      }
+
+      if (visibleCount > 0) {
+        circles.count = visibleCount;
+        circles.instanceMatrix.needsUpdate = true;
+        scene.add(circles);
+        addLegendToggle('circles', circles, '#fff4b8', true);
+
+        const outlineGeometry = new THREE.RingGeometry(0.99, 1.0, 96);
+        const outlineMaterial = new THREE.MeshBasicMaterial({
+          color: CIRCLE_STROKE_COLOR,
+          transparent: false,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        });
+        const outlines = new THREE.InstancedMesh(outlineGeometry, outlineMaterial, visibleCount);
+        outlines.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        outlines.renderOrder = 2;
+        for (let i = 0; i < visibleCount; ++i) {
+          circles.getMatrixAt(i, matrix);
+          outlines.setMatrixAt(i, matrix);
+        }
+        outlines.count = visibleCount;
+        outlines.instanceMatrix.needsUpdate = true;
+        scene.add(outlines);
+        addLegendToggle('circle boundaries', outlines, '#f4c430', true);
       }
     }
 
@@ -305,33 +943,95 @@
 
       if ((group.kind ?? 'index_pairs') === 'positions') {
         const raw = await fetchArray(group.file, Float32Array);
-        const pos = filterPositionSegments(expandFlatToXYZ(raw, meta.dimension));
+        let pos = filterPositionSegments(expandFlatToXYZ(raw, meta.dimension));
+        if (sphereProjection && sphereRadius) {
+          if (group.name === 'circles') {
+            const circleGroup = new THREE.Group();
+            const paths = (sphereCircleCaps && sphereCircleCaps.length >= 8)
+              ? buildSphereCirclePathsFromCaps(sphereCircleCaps, sphereRadius, SPHERE_CIRCLE_SCALE)
+              : [normalizePolylineToSphere(pos, sphereRadius, SPHERE_CIRCLE_SCALE)];
+            for (const path of paths) {
+              if (!path.length) {
+                continue;
+              }
+              const line = createPolylineLine(path, group.color ?? '#f4c430', {
+                linewidth: 3.4,
+                depthTest: true,
+                transparent: false,
+                opacity: 1.0,
+                closed: true,
+              });
+              line.renderOrder = 5;
+              circleGroup.add(line);
+            }
+            if (!sphereCircleIncludesOuter) {
+              const outerCircle = sphereOuterCircleDataFromMeta(meta, sphereRadius, sphereProjectionScale);
+              const outerPath = [];
+              const outer = buildRingSegmentPositions(outerCircle.center, outerCircle.normal, outerCircle.radius, 192, sphereRadius, SPHERE_CIRCLE_SCALE);
+              for (let i = 0; i + 2 < outer.length; i += 6) {
+                outerPath.push(outer[i + 0], outer[i + 1], outer[i + 2]);
+              }
+              const line = createPolylineLine(new Float32Array(outerPath), group.color ?? '#f4c430', {
+                linewidth: 3.4,
+                depthTest: true,
+                transparent: false,
+                opacity: 1.0,
+                closed: true,
+              });
+              line.renderOrder = 5;
+              circleGroup.add(line);
+            }
+            if (sphereCircleOverlay) {
+              sphereCircleOverlay.add(circleGroup);
+              continue;
+            }
+            scene.add(circleGroup);
+            addLegendToggle(group.name, circleGroup, group.color ?? '#f4c430', group.default_visible ?? true);
+            continue;
+          } else {
+            pos = buildPositionSegmentArcPositions(pos, sphereRadius, group.name === 'exploration' ? 28 : 20, SPHERE_EDGE_SCALE);
+          }
+        }
         if (!pos.length) {
           continue;
         }
-        geometry = new THREE.BufferGeometry();
-        geometry.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+        geometry = pos;
       } else {
         const data = await fetchArray(group.file, Uint32Array);
-        const positions = buildIndexedEdgePositions(data, verts);
+        const positions = (sphereProjection && sphereRadius)
+          ? buildIndexedEdgeArcPositions(data, sphereEdgeVerts, sphereRadius, 18, SPHERE_EDGE_SCALE)
+          : buildIndexedEdgePositions(data, verts);
         if (!positions.length) {
           continue;
         }
-        geometry = new THREE.BufferGeometry();
-        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry = positions;
       }
 
-      const material = new THREE.LineBasicMaterial({
-        color: group.color ?? '#2c3e50',
+      const useWide = sphereProjection;
+      const wideWidth = group.name === 'exploration' ? 4.2 : (group.name === 'circles' ? 3.4 : 3.2);
+      const lines = createSegmentLines(geometry, group.color ?? '#2c3e50', {
+        wide: useWide,
+        linewidth: wideWidth,
         depthTest: !is2D,
-        transparent: false,
+        transparent: sphereProjection && group.name === 'circles',
+        opacity: sphereProjection && group.name === 'circles' ? 0.42 : 1.0,
       });
-      const lines = new THREE.LineSegments(geometry, material);
       if (is2D) {
         lines.renderOrder = group.name === 'exploration' ? 20 : 10;
+      } else if (sphereProjection && group.name === 'circles') {
+        lines.renderOrder = 5;
       }
-      scene.add(lines);
-      addLegendToggle(group.name, lines, group.color ?? '#2c3e50', group.default_visible ?? true);
+      if (sphereProjection && group.name === 'circles' && sphereCircleOverlay) {
+        sphereCircleOverlay.add(lines);
+      } else {
+        scene.add(lines);
+        addLegendToggle(group.name, lines, group.color ?? '#2c3e50', group.default_visible ?? true);
+      }
+    }
+
+    if (sphereCircleOverlay && sphereCircleOverlay.children.length > 0) {
+      scene.add(sphereCircleOverlay);
+      addLegendToggle('circles', sphereCircleOverlay, '#fff4b8', true);
     }
 
     const paramSummary = (meta.parameters_summary && String(meta.parameters_summary).trim().length) ? ` · ${meta.parameters_summary}` : '';
@@ -339,6 +1039,9 @@
 
     window.addEventListener('resize', () => {
       renderer.setSize(window.innerWidth, window.innerHeight);
+      for (const material of wideLineMaterials) {
+        material.resolution.set(window.innerWidth, window.innerHeight);
+      }
       if (is2D) {
         fitOrthoCamera(points);
       } else {

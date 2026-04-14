@@ -6,7 +6,7 @@ It provides a streamlined programmatic pipeline for exploring random geometry:
 
   - Generate a map from a chosen model
   - Construct a model-specific layout problem
-  - Compute a 2D (Tutte/circle-packing) or 3D (SFDP) layout
+  - Compute a supported 2D or 3D layout for the chosen model
   - Export or render the final geometry
 
 The codebase is highly optimized for scale and speed. For example, computing the layout of a uniform quadrangulation with 500,000 faces takes approximately 5 minutes on a standard desktop machine.
@@ -18,31 +18,6 @@ The codebase is highly optimized for scale and speed. For example, computing the
     <img src="assets/preview.png" alt="Spanning-tree-decorated Random Planar Map" width="600">
   </a>
 </p>
-
-## Supported Models
-
-The package currently supports four families of decorated random planar maps:
-- `uniform` — uniform quadrangulations
-- `schnyder` — Schnyder-wood-decorated triangulations
-- `fk` — FK-decorated maps with parameter `q` (or `p` from the Hamburger-Cheeseburger bijection). For 2D layouts, the largest gasket is automatically utilized as the boundary.
-- `spanning_tree` — the FK model in the special case where `p = 0`
-
-**Note on FK Sampling Limitations:**
-With the exception of the spanning tree case (`p = 0`), FK-decorated maps are not sampled exactly. Instead, they are approximated using a Markov Chain Monte Carlo (MCMC) algorithm. Users should be aware that the accuracy of this approximation currently degrades for larger values of `p`.
-
-## Supported Layout Engines
-
-- `tutte` — 2D harmonic embedding with fixed boundary vertices
-- `circle_packing` — 2D circle packing for triangulated disk layout problems; it records both circle centers and radii so SVG, web, and Makie previews can draw the circles directly
-- `sfdp` — 3D embedding via Graphviz `sfdp` when available, with a built-in force-layout fallback when Graphviz is not installed
-
-**Future Implementations:**
-- `mated_crt`— Mated-CRT (continuum-random-tree) maps
-- `bipolar` — Bipolar-orientation-decorated maps
-- `meandric` — Random geometry of meanders or meandric systems, including half-plane and uniform variants
-
-**Feature Requests & Collaboration:**
-I am open to implementing additional models and layout algorithms. Please feel free to [reach out via email](mailto:minjaep@auburn.edu) for assistance, feature requests, or research collaboration.
 
 ## Citation
 
@@ -60,6 +35,39 @@ If you use `DecoratedRandomPlanarMaps.jl` in your research or course materials, 
   howpublished = {\url{https://github.com/MinjaePark-Math/DecoratedRandomPlanarMaps.jl}}
 }
 ```
+
+## Supported Models
+
+The package currently supports four families of decorated random planar maps:
+- `uniform` — uniform quadrangulations
+- `schnyder` — Schnyder-wood-decorated triangulations
+- `fk` — FK-decorated maps with parameter `q` (or `p` from the Hamburger-Cheeseburger bijection). For 2D layouts, the boundary is chosen from an `h_gasket` or `c_gasket`.
+- `spanning_tree` — the FK model in the special case where `p = 0`
+
+**Note on FK Sampling Limitations:**
+With the exception of the spanning tree case (`p = 0`), FK-decorated maps are not sampled exactly. Instead, they are approximated using a Markov Chain Monte Carlo (MCMC) algorithm. Users should be aware that the accuracy of this approximation currently degrades for larger values of `p`.
+
+## Supported Layout Engines
+
+- `tutte` — 2D harmonic embedding with fixed boundary vertices
+- `circle_packing` — 2D circle packing for supported disk-topology problems, plus 3D sphere-topology circle packing via inverse stereographic projection; FK / spanning-tree sphere maps remove one outer vertex before packing, while Schnyder removes the outer face (`normalize_scale` sets the sphere radius; `sphere_projection_scale` controls how large the packed disk appears on that sphere; after lifting, a barycenter-based Möbius normalization is applied automatically)
+- `sfdp` — 3D embedding via Graphviz `sfdp` when available, with a built-in force-layout fallback when Graphviz is not installed
+
+Supported model/layout combinations:
+
+- `uniform`: `tutte` in 2D, `sfdp` in 3D
+- `schnyder`: `tutte` or `circle_packing` in 2D, `sfdp` or `circle_packing` in 3D
+- `fk`: `tutte` or `circle_packing` in 2D only with `hc_boundary_mode: h_gasket` or `c_gasket`; `sfdp` or `circle_packing` in 3D
+- `spanning_tree`: `sfdp` or `circle_packing` in 3D only
+
+## Future Implementations
+
+- `mated_crt`— Mated-CRT (continuum-random-tree) maps
+- `bipolar` — Bipolar-orientation-decorated maps
+- `meandric` — Random geometry of meanders or meandric systems, including half-plane and uniform variants
+
+**Feature Requests & Collaboration:**
+I am open to implementing additional models and layout algorithms. Please feel free to [reach out via email](mailto:minjaep@auburn.edu) for assistance, feature requests, or research collaboration.
 
 ## Installation
 

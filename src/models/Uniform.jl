@@ -15,6 +15,7 @@ struct UniformMap <: AbstractRandomPlanarMap
     corner_labels::Vector{Int32}
     vertex_labels::Vector{Int32}
     faces::Vector{Vector{Int32}}     # vertex ids are 0-based
+    face_edge_ids::Vector{Vector{Int32}}
     edge_u::Vector{Int32}
     edge_v::Vector{Int32}
     edge_color::Vector{Int8}
@@ -123,6 +124,7 @@ function extract_undirected_edges(m::PlanarMap, root_halfedge::Integer)
     edge_u = Int32[]
     edge_v = Int32[]
     edge_color = Int8[]
+    halfedge_to_undirected = fill(Int32(-1), length(m.edges))
     root_pair = sort((Int(root_halfedge), Int(m.edges[Int(root_halfedge)].adj)))
     root_edge_id = -1
 
@@ -136,6 +138,9 @@ function extract_undirected_edges(m::PlanarMap, root_halfedge::Integer)
 
         push!(edge_u, m.edges[eid].vertex)
         push!(edge_v, m.edges[adj].vertex)
+        undirected_id = Int32(length(edge_u) - 1)
+        halfedge_to_undirected[eid] = undirected_id
+        halfedge_to_undirected[adj] = undirected_id
 
         pair = sort((eid, adj))
         color = pair == root_pair ? ROOT_COLOR : EDGE_COLOR
@@ -146,7 +151,31 @@ function extract_undirected_edges(m::PlanarMap, root_halfedge::Integer)
     end
 
     root_edge_id >= 0 || error("failed to identify the root edge")
-    return edge_u, edge_v, edge_color, Int32(root_edge_id)
+    return edge_u, edge_v, edge_color, Int32(root_edge_id), halfedge_to_undirected
+end
+
+function extract_faces_with_edge_ids(m::PlanarMap, halfedge_to_undirected)::Tuple{Vector{Vector{Int32}},Vector{Vector{Int32}}}
+    seen = Set{Int}()
+    faces = Vector{Vector{Int32}}()
+    face_edge_ids = Vector{Vector{Int32}}()
+    for eid in eachindex(m.edges)
+        eid in seen && continue
+        cur = eid
+        face = Int32[]
+        edge_ids = Int32[]
+        while true
+            push!(seen, cur)
+            push!(face, m.edges[cur].vertex)
+            undirected_id = halfedge_to_undirected[cur]
+            undirected_id >= 0 || throw(ArgumentError("missing undirected edge id for halfedge $cur"))
+            push!(edge_ids, undirected_id)
+            cur = Int(m.edges[cur].next)
+            cur == eid && break
+        end
+        push!(faces, face)
+        push!(face_edge_ids, edge_ids)
+    end
+    return faces, face_edge_ids
 end
 
 function build_uniform_quadrangulation_map(dyck_path, matching, edge_labels)::UniformMap
@@ -252,8 +281,8 @@ function build_uniform_quadrangulation_map(dyck_path, matching, edge_labels)::Un
         end
     end
 
-    faces = extract_faces(m)
-    edge_u, edge_v, edge_color, root_edge = extract_undirected_edges(m, root_halfedge)
+    edge_u, edge_v, edge_color, root_edge, halfedge_to_undirected = extract_undirected_edges(m, root_halfedge)
+    faces, face_edge_ids = extract_faces_with_edge_ids(m, halfedge_to_undirected)
 
     return UniformMap(
         dyck,
@@ -262,6 +291,7 @@ function build_uniform_quadrangulation_map(dyck_path, matching, edge_labels)::Un
         corner_labels,
         vertex_labels,
         faces,
+        face_edge_ids,
         edge_u,
         edge_v,
         edge_color,

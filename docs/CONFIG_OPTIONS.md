@@ -50,8 +50,9 @@ Common keys:
 
 3D keys:
 
-- `engine`: currently `sfdp`
+- `engine`: `sfdp` or `circle_packing`
 - `normalize_scale`: target radius after normalization
+- `sphere_projection_scale`: for `engine: circle_packing`, scales the packing in stereographic coordinates before lifting; values larger than `1` make the outer spherical face smaller while keeping `normalize_scale` as the actual sphere radius
 - `K`: optional SFDP ideal edge-length parameter
 - `repulsiveforce`: optional SFDP repulsion-strength parameter
 - `iterations`: optional iteration count for the built-in force-layout fallback
@@ -59,8 +60,25 @@ Common keys:
 
 `layout.options` currently supports:
 
-- `hc_boundary_mode`: `h_gasket`, `c_gasket`, or `face` (`face` uses a triangular outer face with explicit equilateral boundary positions in 2D)
+- `hc_boundary_mode`: `h_gasket` or `c_gasket` for FK 2D layouts
+- `outer_vertex`: when FK `dimension: 3` uses `engine: circle_packing`, choose which FK vertex is removed before disk packing and then reinserted as the outer spherical vertex
 - `outer_face_index`: explicit outer face choice for uniform 2D
+
+3D circle-packing notes:
+
+- `circle_packing` in `dimension: 3` currently supports sphere-topology layouts for `schnyder`, `fk`, and `spanning_tree`
+- for FK sphere maps it removes one chosen outer vertex, packs the remaining disk triangulation, and then reinserts that vertex at the north pole for rendering
+- for Schnyder it removes the outer triangle for packing and renders an auxiliary outer spherical vertex connected to that boundary
+- `normalize_scale` sets the sphere radius for the lifted 3D embedding
+- `sphere_projection_scale` changes how large the packed disk appears on that sphere without changing the sphere radius itself
+- after lifting, the package applies a barycenter-based Möbius normalization automatically; this is the default sphere normalization path and does not currently expose extra tuning knobs
+
+Supported layout combinations:
+
+- `uniform`: `tutte` in 2D, `sfdp` in 3D
+- `schnyder`: `tutte` or `circle_packing` in 2D, `sfdp` or `circle_packing` in 3D
+- `fk`: `tutte` or `circle_packing` in 2D only with `hc_boundary_mode: h_gasket` or `c_gasket`; `sfdp` or `circle_packing` in 3D
+- `spanning_tree`: `sfdp` or `circle_packing` in 3D only
 
 ## `output`
 
@@ -131,6 +149,39 @@ layout:
 output:
   preview_svg: ./exports/schnyder_circle_packing.svg
 ```
+
+### Schnyder 3D sphere circle packing
+
+```yaml
+model:
+  type: schnyder
+  faces: 200
+  seed: 7
+
+layout:
+  dimension: 3
+  engine: circle_packing
+  normalize_scale: 1.0
+  maxiter: 100
+
+output:
+  export_web: ./exports/schnyder_sphere_circle_packing
+```
+
+### Sphere circle packing normalization
+
+```yaml
+layout:
+  dimension: 3
+  engine: circle_packing
+  sphere_projection_scale: 1.2
+```
+
+### Unsupported combinations
+
+- `uniform` with `engine: circle_packing` is rejected
+- `spanning_tree` with `dimension: 2` is rejected
+- FK 2D with `hc_boundary_mode: face` is rejected
 
 
 ### FK sampling note

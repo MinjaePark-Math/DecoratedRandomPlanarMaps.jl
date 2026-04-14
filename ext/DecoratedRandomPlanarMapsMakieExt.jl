@@ -278,7 +278,7 @@ function _resolved_title(title::AbstractString, map_data, metadata, dim::Int)
     return "$(title) · $(params)"
 end
 
-function DecoratedRandomPlanarMaps.render_makie_3d(map_data, pos; edge_groups=nothing, faces=nothing, triangles=nothing, metadata=nothing, title::AbstractString="3D map")
+function DecoratedRandomPlanarMaps.render_makie_3d(map_data, pos; edge_groups=nothing, faces=nothing, triangles=nothing, sphere_circle_geometry=nothing, metadata=nothing, title::AbstractString="3D map")
     pos3 = DRPM.pad_positions_3d(pos)
     points, tri, groups, expl_points, validmask = _geometry(map_data, pos3; edge_groups=edge_groups, faces=faces, triangles=triangles, metadata=metadata, dim=3)
     family = _family(map_data, groups; metadata=metadata)
@@ -292,6 +292,9 @@ function DecoratedRandomPlanarMaps.render_makie_3d(map_data, pos; edge_groups=no
     entries = Pair{String,String}[]
     for key in group_keys
         push!(entries, key => key)
+    end
+    if sphere_circle_geometry !== nothing
+        push!(entries, "__circles__" => "circles")
     end
     if DRPM.should_include_exploration(map_data; edge_groups=groups, metadata=metadata)
         push!(entries, "__exploration__" => "exploration")
@@ -311,6 +314,16 @@ function DecoratedRandomPlanarMaps.render_makie_3d(map_data, pos; edge_groups=no
         isempty(segs) && continue
         style = _line_style(family, name, 3)
         linesegments!(ax, segs; color=style.color, linewidth=style.linewidth, visible=group_toggles[name].active)
+    end
+
+    if haskey(group_toggles, "__circles__")
+        circle_segments = DRPM.sphere_circle_segment_points(sphere_circle_geometry)
+        circle_points = size(circle_segments, 1) == 0 ? Point3f[] : _as_points_3d(circle_segments)
+        if isempty(circle_points)
+            group_toggles["__circles__"].active[] = false
+        else
+            linesegments!(ax, circle_points; color=get(DRPM.EDGE_COLOR_HINTS, "circles", "#f4c430"), linewidth=2.1, visible=group_toggles["__circles__"].active)
+        end
     end
 
     if haskey(group_toggles, "__exploration__") && !isempty(expl_points)

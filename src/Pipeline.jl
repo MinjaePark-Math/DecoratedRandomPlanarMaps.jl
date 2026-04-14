@@ -214,6 +214,245 @@ function _ensure_makie_extension_loaded()
     return ext
 end
 
+function _circle_packing_problem_inputs(problem)
+    boundary_vertices = problem.packing_boundary_vertices === nothing ? problem.boundary_vertices : problem.packing_boundary_vertices
+    faces = problem.packing_faces === nothing ? problem.faces : problem.packing_faces
+    triangles = problem.packing_triangles === nothing ? problem.surface_triangles : problem.packing_triangles
+    triangle_edge_ids = problem.packing_triangle_edge_ids === nothing ? problem.surface_triangle_edge_ids : problem.packing_triangle_edge_ids
+    return boundary_vertices, faces, triangles, triangle_edge_ids
+end
+
+function _append_edge_group_edges(edge_groups::Dict{String,Matrix{Int32}}, name::AbstractString, extra_edges)
+    arr = sanitize_edge_array(extra_edges)
+    size(arr, 1) == 0 && return edge_groups
+    out = Dict{String,Matrix{Int32}}(k => copy(v) for (k, v) in edge_groups)
+    key = string(name)
+    if haskey(out, key)
+        out[key] = vcat(out[key], arr)
+    else
+        out[key] = arr
+    end
+    return out
+end
+
+function _recover_outer_vertex_edge_groups(map_data::FKMap, outer_vertex::Int32)
+    recovered = Dict{String,Matrix{Int32}}()
+    raw = raw_active_edges_by_color(map_data; drop_loops=true)
+    for color in (GREEN, RED, BLUE, PURPLE, ORANGE)
+        arr = get(raw, Int(color), Matrix{Int32}(undef, 0, 2))
+        size(arr, 1) == 0 && continue
+        keep = BitVector(undef, size(arr, 1))
+        for i in 1:size(arr, 1)
+            keep[i] = arr[i, 1] == outer_vertex || arr[i, 2] == outer_vertex
+        end
+        selected = arr[keep, :]
+        size(selected, 1) == 0 && continue
+        name = FK_COLOR_NAME[Int(color)]
+        name == "green" && (name = "generic")
+        recovered = _append_edge_group_edges(recovered, name, selected)
+    end
+    return recovered
+end
+
+function _replace_outer_vertex_edges_with_generic(edge_groups::Dict{String,Matrix{Int32}}, outer_vertex::Int32, boundary_vertices)
+    boundary = Int32.(collect(boundary_vertices))
+    isempty(boundary) && return edge_groups
+    star_edges = sanitize_edge_array(hcat(fill(outer_vertex, length(boundary)), boundary))
+
+    star_keys = Set{Tuple{Int32,Int32}}()
+    for i in 1:size(star_edges, 1)
+        u = star_edges[i, 1]
+        v = star_edges[i, 2]
+        push!(star_keys, (min(u, v), max(u, v)))
+    end
+
+    out = Dict{String,Matrix{Int32}}()
+    for (name, edge_array) in edge_groups
+        arr = sanitize_edge_array(edge_array)
+        size(arr, 1) == 0 && continue
+        keep = BitVector(undef, size(arr, 1))
+        for i in 1:size(arr, 1)
+            key = (min(arr[i, 1], arr[i, 2]), max(arr[i, 1], arr[i, 2]))
+            keep[i] = !(key in star_keys)
+        end
+        filtered = arr[keep, :]
+        size(filtered, 1) == 0 && continue
+        out[string(name)] = filtered
+    end
+
+    generic_existing = get(out, "generic", Matrix{Int32}(undef, 0, 2))
+    out["generic"] = first(collapse_undirected_edges(vcat(generic_existing, star_edges); drop_loops=true))
+    return out
+end
+
+function _remap_edge_groups_for_render(edge_groups::Dict{String,Matrix{Int32}}, mapping)
+    packed_to_render = Int32.(collect(mapping))
+    isempty(packed_to_render) && return Dict{String,Matrix{Int32}}(k => copy(v) for (k, v) in edge_groups)
+
+    out = Dict{String,Matrix{Int32}}()
+    for (name, edge_array) in edge_groups
+        arr = sanitize_edge_array(edge_array)
+        if size(arr, 1) == 0
+            out[string(name)] = arr
+            continue
+        end
+        remapped = Matrix{Int32}(undef, size(arr, 1), 2)
+        for i in 1:size(arr, 1)
+            remapped[i, 1] = packed_to_render[Int(arr[i, 1]) + 1]
+            remapped[i, 2] = packed_to_render[Int(arr[i, 2]) + 1]
+        end
+        out[string(name)] = remapped
+    end
+    return out
+end
+
+function _fan_triangles_for_boundary(boundary_vertices, outer_vertex::Integer)
+    boundary = Int32.(collect(boundary_vertices))
+    length(boundary) >= 3 || return Matrix{Int32}(undef, 0, 3)
+    fan = Matrix{Int32}(undef, length(boundary), 3)
+    for i in 1:length(boundary)
+        fan[i, 1] = Int32(outer_vertex)
+        fan[i, 2] = boundary[i]
+        fan[i, 3] = boundary[mod1(i + 1, length(boundary))]
+    end
+    return sanitize_triangles(fan; drop_degenerate=true, deduplicate=true)
+end
+
+function _augment_sphere_render_triangles(triangles, render_count::Integer, layout_metadata)
+    triangles === nothing && return Matrix{Int32}(undef, 0, 3)
+    tri = sanitize_triangles(triangles; drop_degenerate=true, deduplicate=false)
+    topo = get(layout_metadata, "packing_topology", nothing)
+    topo == "sphere" || return tri
+
+    if haskey(layout_metadata, "circle_packing_removed_outer_vertex") && haskey(layout_metadata, "circle_packing_packing_to_render_vertices")
+        outer_vertex = Int(get(layout_metadata, "circle_packing_removed_outer_vertex", 0))
+        mapping = Int.(collect(layout_metadata["circle_packing_packing_to_render_vertices"]))
+        remapped = _reindex_triangles(tri, Dict(i - 1 => mapping[i] for i in eachindex(mapping)); deduplicate=false)
+        if haskey(layout_metadata, "circle_packing_outer_boundary_vertices")
+            fan = _fan_triangles_for_boundary(layout_metadata["circle_packing_outer_boundary_vertices"], outer_vertex)
+            remapped = vcat(remapped, fan)
+        end
+        return sanitize_triangles(remapped; drop_degenerate=true, deduplicate=true)
+    end
+
+    if haskey(layout_metadata, "circle_packing_outer_boundary_vertices")
+        outer_vertex = Int(render_count) - 1
+        fan = _fan_triangles_for_boundary(layout_metadata["circle_packing_outer_boundary_vertices"], outer_vertex)
+        return sanitize_triangles(vcat(tri, fan); drop_degenerate=true, deduplicate=true)
+    end
+
+    return tri
+end
+
+function _expand_sphere_circle_geometry_for_render(sphere_circle_geometry, render_count::Integer, mapping, outer_vertex::Integer, layout_metadata)
+    sphere_circle_geometry === nothing && return nothing
+    render_n = Int(render_count)
+    render_n >= 0 || throw(ArgumentError("render_count must be nonnegative"))
+    packed_to_render = Int.(collect(mapping))
+    length(packed_to_render) == size(sphere_circle_geometry["normals"], 1) ||
+        throw(ArgumentError("sphere circle geometry must align with the packed render mapping"))
+
+    centers = fill(NaN, render_n, 3)
+    normals = fill(NaN, render_n, 3)
+    radii = fill(NaN, render_n)
+    offsets = fill(NaN, render_n)
+
+    for (i, render_vertex) in enumerate(packed_to_render)
+        centers[render_vertex + 1, :] .= sphere_circle_geometry["centers"][i, :]
+        normals[render_vertex + 1, :] .= sphere_circle_geometry["normals"][i, :]
+        radii[render_vertex + 1] = sphere_circle_geometry["radii"][i]
+        offsets[render_vertex + 1] = sphere_circle_geometry["offsets"][i]
+    end
+
+    outer_geometry = get(layout_metadata, "sphere_outer_circle_geometry", nothing)
+    outer_geometry === nothing && haskey(sphere_circle_geometry, "outer_geometry") && (outer_geometry = sphere_circle_geometry["outer_geometry"])
+    outer_geometry === nothing && throw(ArgumentError("sphere circle render requires explicit outer-circle geometry"))
+    centers[Int(outer_vertex) + 1, :] .= Float64.(outer_geometry["centers"][1, :])
+    normals[Int(outer_vertex) + 1, :] .= Float64.(outer_geometry["normals"][1, :])
+    radii[Int(outer_vertex) + 1] = float(outer_geometry["radii"][1])
+    offsets[Int(outer_vertex) + 1] = float(outer_geometry["offsets"][1])
+
+    out = Dict{String,Any}(
+        "centers" => centers,
+        "normals" => normals,
+        "radii" => radii,
+        "offsets" => offsets,
+        "sphere_radius" => float(get(layout_metadata, "sphere_radius", sphere_circle_geometry["sphere_radius"])),
+        "projection_scale" => get(layout_metadata, "sphere_effective_projection_scale", get(layout_metadata, "sphere_projection_scale", get(sphere_circle_geometry, "projection_scale", 1.0))),
+        "projection" => get(sphere_circle_geometry, "projection", "inverse_stereographic"),
+    )
+    outer_geometry !== nothing && (out["outer_geometry"] = outer_geometry)
+    return out
+end
+
+function _augment_sphere_circle_render(base_pos, edge_groups, sphere_circle_geometry, layout_metadata, map_data=nothing)
+    topo = get(layout_metadata, "packing_topology", nothing)
+    topo == "sphere" || return base_pos, edge_groups, sphere_circle_geometry
+
+    sphere_radius = float(get(layout_metadata, "sphere_radius", 1.0))
+
+    function outer_vertex_position(render_geometry, outer_vertex)
+        normals = Float64.(render_geometry["normals"])
+        return -sphere_radius .* normals[Int(outer_vertex) + 1, :]
+    end
+
+    if haskey(layout_metadata, "circle_packing_removed_outer_vertex") && haskey(layout_metadata, "circle_packing_packing_to_render_vertices")
+        outer_vertex = Int(get(layout_metadata, "circle_packing_removed_outer_vertex", 0))
+        boundary = Int32.(collect(get(layout_metadata, "circle_packing_outer_boundary_vertices", Int[])))
+        render_count = Int(get(layout_metadata, "circle_packing_render_vertex_count", size(base_pos, 1) + 1))
+        mapping = Int.(collect(layout_metadata["circle_packing_packing_to_render_vertices"]))
+        length(mapping) == size(base_pos, 1) || throw(ArgumentError("circle_packing_packing_to_render_vertices must align with the computed sphere layout"))
+        remapped_edge_groups = _remap_edge_groups_for_render(edge_groups, mapping)
+        render_pos = Matrix{Float64}(undef, render_count, size(base_pos, 2))
+        fill!(render_pos, NaN)
+        for (i, original_vertex) in enumerate(mapping)
+            render_pos[original_vertex + 1, :] .= base_pos[i, :]
+        end
+        render_edge_groups = if map_data isa FKMap
+            recovered = _recover_outer_vertex_edge_groups(map_data, Int32(outer_vertex))
+            out = remapped_edge_groups
+            for (name, arr) in recovered
+                out = _append_edge_group_edges(out, name, arr)
+            end
+            out
+        else
+            _replace_outer_vertex_edges_with_generic(remapped_edge_groups, Int32(outer_vertex), boundary)
+        end
+        render_geometry = _expand_sphere_circle_geometry_for_render(
+            sphere_circle_geometry,
+            render_count,
+            mapping,
+            outer_vertex,
+            layout_metadata,
+        )
+        render_pos[outer_vertex + 1, :] .= outer_vertex_position(render_geometry, outer_vertex)
+        layout_metadata["circle_packing_render_outer_vertex"] = outer_vertex
+        layout_metadata["sphere_circle_geometry_includes_outer"] = true
+        return render_pos, render_edge_groups, render_geometry
+    end
+
+    if haskey(layout_metadata, "circle_packing_outer_boundary_vertices")
+        boundary = Int32.(collect(layout_metadata["circle_packing_outer_boundary_vertices"]))
+        outer_vertex = Int32(size(base_pos, 1))
+        render_pos = vcat(base_pos, reshape(zeros(Float64, 3), 1, :))
+        extra_edges = hcat(fill(outer_vertex, length(boundary)), boundary)
+        render_geometry = _expand_sphere_circle_geometry_for_render(
+            sphere_circle_geometry,
+            size(render_pos, 1),
+            collect(0:(size(base_pos, 1) - 1)),
+            outer_vertex,
+            layout_metadata,
+        )
+        render_pos[Int(outer_vertex) + 1, :] .= outer_vertex_position(render_geometry, outer_vertex)
+        layout_metadata["circle_packing_render_outer_vertex"] = Int(outer_vertex)
+        layout_metadata["circle_packing_render_vertex_count"] = size(render_pos, 1)
+        layout_metadata["sphere_circle_geometry_includes_outer"] = true
+        return render_pos, _append_edge_group_edges(edge_groups, "generic", extra_edges), render_geometry
+    end
+
+    return base_pos, edge_groups, sphere_circle_geometry
+end
+
 function run_pipeline(config_path::AbstractString)
     return run_pipeline(load_config(config_path))
 end
@@ -238,6 +477,9 @@ function run_pipeline(cfg)
     dimension = Int(get(layout_cfg, "dimension", 3))
     layout_seed = Int(get(layout_cfg, "seed", get(model_cfg, "seed", 7)))
     layout_options = _as_string_dict(get(layout_cfg, "options", Dict{String,Any}()))
+    layout_engine = replace(lowercase(strip(string(get(layout_cfg, "engine", dimension == 3 ? "sfdp" : "tutte")))), '-' => '_')
+    layout_options = copy(layout_options)
+    layout_options["engine"] = layout_engine
 
     println("Preparing $(dimension)D layout problem...")
     problem = track!(timings, "prepare_layout") do
@@ -257,39 +499,77 @@ function run_pipeline(cfg)
 
     base_pos = nothing
     circle_radii = nothing
+    sphere_circle_geometry = nothing
     layout_metadata = Dict{String,Any}()
     engine_title = dimension == 2 ? "Tutte" : "SFDP"
 
     if dimension == 3
-        engine = lowercase(strip(string(get(layout_cfg, "engine", "sfdp"))))
-        engine == "sfdp" || throw(ArgumentError("unsupported 3D layout engine $(repr(engine)); only 'sfdp' is currently implemented"))
+        engine = layout_engine
         layout_normalize_scale = float(get(layout_cfg, "normalize_scale", 1.0))
-        sfdp_K = _optional_float(get(layout_cfg, "K", get(layout_options, "K", nothing)))
-        sfdp_repulsiveforce = _optional_float(get(layout_cfg, "repulsiveforce", get(layout_options, "repulsiveforce", nothing)))
-        sfdp_iterations = _optional_int(get(layout_cfg, "iterations", get(layout_options, "iterations", nothing)))
-        sfdp_overlap = _optional_string(get(layout_cfg, "overlap", get(layout_options, "overlap", nothing)))
+        if engine == "sfdp"
+            sfdp_K = _optional_float(get(layout_cfg, "K", get(layout_options, "K", nothing)))
+            sfdp_repulsiveforce = _optional_float(get(layout_cfg, "repulsiveforce", get(layout_options, "repulsiveforce", nothing)))
+            sfdp_iterations = _optional_int(get(layout_cfg, "iterations", get(layout_options, "iterations", nothing)))
+            sfdp_overlap = _optional_string(get(layout_cfg, "overlap", get(layout_options, "overlap", nothing)))
 
-        println("Computing SFDP layout...")
-        base_pos = track!(timings, "compute_layout") do
-            compute_sfdp_layout(
-                problem.num_vertices,
-                problem.edges;
-                scale=layout_normalize_scale,
-                seed=layout_seed,
-                K=sfdp_K,
-                repulsiveforce=sfdp_repulsiveforce,
-                iterations=sfdp_iterations,
-                overlap=sfdp_overlap,
-                options=layout_options,
-            )
+            println("Computing SFDP layout...")
+            base_pos = track!(timings, "compute_layout") do
+                compute_sfdp_layout(
+                    problem.num_vertices,
+                    problem.edges;
+                    scale=layout_normalize_scale,
+                    seed=layout_seed,
+                    K=sfdp_K,
+                    repulsiveforce=sfdp_repulsiveforce,
+                    iterations=sfdp_iterations,
+                    overlap=sfdp_overlap,
+                    options=layout_options,
+                )
+            end
+            layout_metadata = Dict("engine" => "sfdp", "dimension" => 3)
+            sfdp_K !== nothing && (layout_metadata["K"] = sfdp_K)
+            sfdp_repulsiveforce !== nothing && (layout_metadata["repulsiveforce"] = sfdp_repulsiveforce)
+            sfdp_iterations !== nothing && (layout_metadata["iterations"] = sfdp_iterations)
+            sfdp_overlap !== nothing && (layout_metadata["overlap"] = sfdp_overlap)
+        elseif engine == "circle_packing"
+            engine_title = "Circle Packing"
+            cp_boundary, cp_faces, cp_triangles, cp_triangle_edge_ids = _circle_packing_problem_inputs(problem)
+            cp_boundary === nothing && throw(ArgumentError("3D circle packing requires a sphere-topology packing boundary, but this layout problem does not provide one"))
+            cp_maxiter = Int(get(layout_cfg, "maxiter", get(layout_cfg, "iterations", get(layout_options, "maxiter", get(layout_options, "iterations", 200)))))
+            cp_tol = float(get(layout_cfg, "tol", get(layout_options, "tol", 1.0e-8)))
+            cp_relaxation = float(get(layout_cfg, "relaxation", get(layout_options, "relaxation", 1.0)))
+            cp_initial_radius = float(get(layout_cfg, "initial_radius", get(layout_options, "initial_radius", 0.5)))
+            cp_min_radius = float(get(layout_cfg, "min_radius", get(layout_options, "min_radius", 1.0e-8)))
+            cp_projection_scale = float(get(layout_cfg, "sphere_projection_scale", get(layout_options, "sphere_projection_scale", 1.0)))
+
+            println("Computing sphere circle packing layout...")
+            base_pos, circle_radii, packing_meta = track!(timings, "compute_layout") do
+                compute_circle_packing_layout(
+                    problem.num_vertices,
+                    problem.edges,
+                    cp_boundary;
+                    faces=cp_faces,
+                    triangles=cp_triangles,
+                    triangle_edge_ids=cp_triangle_edge_ids,
+                    maxiter=cp_maxiter,
+                    tol=cp_tol,
+                    relaxation=cp_relaxation,
+                    initial_radius=cp_initial_radius,
+                    min_radius=cp_min_radius,
+                    project_to_sphere=true,
+                    sphere_radius=layout_normalize_scale,
+                    sphere_projection_scale=cp_projection_scale,
+                    return_metadata=true,
+                )
+            end
+            sphere_circle_geometry = pop!(packing_meta, "sphere_circle_geometry", nothing)
+            layout_metadata = _merged_metadata(Dict("engine" => "circle_packing", "dimension" => 3), packing_meta)
+            println("   converged=$(get(layout_metadata, "converged", false)) iterations=$(get(layout_metadata, "iterations", 0))")
+        else
+            throw(ArgumentError("unsupported 3D layout engine $(repr(engine)); expected 'sfdp' or 'circle_packing'"))
         end
-        layout_metadata = Dict("engine" => "sfdp", "dimension" => 3)
-        sfdp_K !== nothing && (layout_metadata["K"] = sfdp_K)
-        sfdp_repulsiveforce !== nothing && (layout_metadata["repulsiveforce"] = sfdp_repulsiveforce)
-        sfdp_iterations !== nothing && (layout_metadata["iterations"] = sfdp_iterations)
-        sfdp_overlap !== nothing && (layout_metadata["overlap"] = sfdp_overlap)
     else
-        engine = replace(lowercase(strip(string(get(layout_cfg, "engine", "tutte")))), '-' => '_')
+        engine = layout_engine
 
         if engine == "tutte"
             engine_title = "Tutte"
@@ -320,6 +600,7 @@ function run_pipeline(cfg)
             end
         elseif engine == "circle_packing"
             engine_title = "Circle Packing"
+            cp_boundary, cp_faces, cp_triangles, cp_triangle_edge_ids = _circle_packing_problem_inputs(problem)
             cp_maxiter = Int(get(layout_cfg, "maxiter", get(layout_cfg, "iterations", get(layout_options, "maxiter", get(layout_options, "iterations", 200)))))
             cp_tol = float(get(layout_cfg, "tol", get(layout_options, "tol", 1.0e-8)))
             cp_relaxation = float(get(layout_cfg, "relaxation", get(layout_options, "relaxation", 1.0)))
@@ -331,10 +612,10 @@ function run_pipeline(cfg)
                 compute_circle_packing_layout(
                     problem.num_vertices,
                     problem.edges,
-                    problem.boundary_vertices;
-                    faces=problem.faces,
-                    triangles=problem.surface_triangles,
-                    triangle_edge_ids=problem.surface_triangle_edge_ids,
+                    cp_boundary;
+                    faces=cp_faces,
+                    triangles=cp_triangles,
+                    triangle_edge_ids=cp_triangle_edge_ids,
                     maxiter=cp_maxiter,
                     tol=cp_tol,
                     relaxation=cp_relaxation,
@@ -352,6 +633,11 @@ function run_pipeline(cfg)
     end
 
     render_source = problem.render_map_data
+    render_edge_groups = problem.edge_groups
+    render_faces = problem.faces
+    render_triangles = problem.surface_triangles
+    web_render_faces = render_faces
+    web_render_triangles = render_triangles
 
     if problem.render_vertex_indices !== nothing
         render_idx = Int.(problem.render_vertex_indices) .+ 1
@@ -361,9 +647,22 @@ function run_pipeline(cfg)
         if circle_radii !== nothing
             circle_radii = circle_radii[render_idx]
         end
+        if sphere_circle_geometry !== nothing
+            sphere_circle_geometry = subset_sphere_circle_geometry(sphere_circle_geometry, render_idx)
+        end
         layout_metadata["layout_vertex_count"] = get(layout_metadata, "layout_vertex_count", problem.num_vertices)
         layout_metadata["render_vertex_count"] = size(base_pos, 1)
         layout_metadata["render_vertex_projection"] = "subset"
+    end
+
+    render_metadata = _merged_metadata(merged_problem_metadata, layout_metadata)
+    render_pos = base_pos
+    if sphere_circle_geometry !== nothing
+        render_pos, render_edge_groups, sphere_circle_geometry = _augment_sphere_circle_render(base_pos, render_edge_groups, sphere_circle_geometry, render_metadata, render_source)
+        web_render_triangles = _augment_sphere_render_triangles(web_render_triangles, size(render_pos, 1), render_metadata)
+        circle_radii = sphere_circle_geometry === nothing ? circle_radii : Float64.(sphere_circle_geometry["radii"])
+        render_faces = nothing
+        render_triangles = Matrix{Int32}(undef, 0, 3)
     end
 
     export_web = _optional_string(get(output_cfg, "export_web", nothing))
@@ -373,13 +672,14 @@ function run_pipeline(cfg)
         track!(timings, "export_web") do
             export_web_binaries(
                 render_source,
-                base_pos .* web_scale,
+                render_pos .* web_scale,
                 export_web;
-                edge_groups=problem.edge_groups,
-                faces=problem.faces,
-                triangles=problem.surface_triangles,
+                edge_groups=render_edge_groups,
+                faces=web_render_faces,
+                triangles=web_render_triangles,
                 circle_radii=circle_radii === nothing ? nothing : circle_radii .* web_scale,
-                metadata=_merged_metadata(merged_problem_metadata, layout_metadata),
+                sphere_circle_geometry=scale_sphere_circle_geometry(sphere_circle_geometry, web_scale),
+                metadata=render_metadata,
             )
         end
     end
@@ -401,14 +701,14 @@ function run_pipeline(cfg)
         track!(timings, "preview_svg") do
             export_svg_preview(
                 render_source,
-                base_pos .* preview_scale,
+                render_pos .* preview_scale,
                 preview_svg;
-                edge_groups=problem.edge_groups,
-                faces=problem.faces,
-                triangles=problem.surface_triangles,
+                edge_groups=render_edge_groups,
+                faces=render_faces,
+                triangles=render_triangles,
                 circle_radii=circle_radii === nothing ? nothing : circle_radii .* preview_scale,
-                title=default_render_title(render_source; metadata=_merged_metadata(merged_problem_metadata, layout_metadata), dimension=2, engine=engine_title),
-                metadata=_merged_metadata(merged_problem_metadata, layout_metadata),
+                title=default_render_title(render_source; metadata=render_metadata, dimension=2, engine=engine_title),
+                metadata=render_metadata,
             )
         end
     end
@@ -423,14 +723,14 @@ function run_pipeline(cfg)
                 Base.invokelatest(
                     render_makie_2d,
                     render_source,
-                    base_pos .* show_scale,
+                    render_pos .* show_scale,
                     ;
-                    edge_groups=problem.edge_groups,
-                    faces=problem.faces,
-                    triangles=problem.surface_triangles,
+                    edge_groups=render_edge_groups,
+                    faces=render_faces,
+                    triangles=render_triangles,
                     circle_radii=circle_radii === nothing ? nothing : circle_radii .* show_scale,
-                    title=default_render_title(render_source; metadata=_merged_metadata(merged_problem_metadata, layout_metadata), dimension=2, engine=engine_title),
-                    metadata=_merged_metadata(merged_problem_metadata, layout_metadata),
+                    title=default_render_title(render_source; metadata=render_metadata, dimension=2, engine=engine_title),
+                    metadata=render_metadata,
                 )
             end
         else
@@ -441,13 +741,14 @@ function run_pipeline(cfg)
                 Base.invokelatest(
                     render_makie_3d,
                     render_source,
-                    base_pos .* show_scale,
+                    render_pos .* show_scale,
                     ;
-                    edge_groups=problem.edge_groups,
-                    faces=problem.faces,
-                    triangles=problem.surface_triangles,
-                    title=default_render_title(render_source; metadata=_merged_metadata(merged_problem_metadata, layout_metadata), dimension=3, engine=engine_title),
-                    metadata=_merged_metadata(merged_problem_metadata, layout_metadata),
+                    edge_groups=render_edge_groups,
+                    faces=render_faces,
+                    triangles=render_triangles,
+                    sphere_circle_geometry=scale_sphere_circle_geometry(sphere_circle_geometry, show_scale),
+                    title=default_render_title(render_source; metadata=render_metadata, dimension=3, engine=engine_title),
+                    metadata=render_metadata,
                 )
             end
         end

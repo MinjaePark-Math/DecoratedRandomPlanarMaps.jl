@@ -78,5 +78,23 @@ const MAKIE_PIPELINE_3D_VIEWER_CALLS = Ref(0)
                 end
             end
         end
+
+        @testset "3D sphere circle packing show opens the Makie viewer" begin
+            Main.MAKIE_PIPELINE_3D_VIEWER_CALLS[] = 0
+
+            mktempdir() do tmp
+                cd(tmp) do
+                    timings = DecoratedRandomPlanarMaps.run_pipeline(Dict(
+                        "model" => Dict("type" => "schnyder", "faces" => 8, "seed" => 7),
+                        "layout" => Dict("dimension" => 3, "engine" => "circle_packing", "maxiter" => 50),
+                        "output" => Dict("show" => true),
+                    ))
+
+                    @test Main.MAKIE_PIPELINE_3D_VIEWER_CALLS[] == 1
+                    @test all(step.name != "export_web" for step in timings.steps)
+                    @test !isdir(joinpath(tmp, "decoratedrandomplanarmaps_preview_web"))
+                end
+            end
+        end
     end
 end

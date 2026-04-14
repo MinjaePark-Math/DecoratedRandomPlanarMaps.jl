@@ -1,0 +1,15 @@
+model:
+  type: spanning_tree
+  faces: 3000
+  seed: 712
+
+layout:
+  dimension: 3
+  engine: circle_packing
+  maxiter: 1000
+
+output:
+  export_web: ./exports/spanning_tree_3d_cp
+  preview_svg: ./exports/spanning_tree_3d_cp/preview.svg
+  show: true
+  timings_json: ./exports/spanning_tree_3d_cp/timings.json

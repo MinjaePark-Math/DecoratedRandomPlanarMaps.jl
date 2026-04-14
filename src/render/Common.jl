@@ -7,6 +7,7 @@ const EDGE_COLOR_HINTS = Dict(
     "blue" => "#2980b9",
     "purple" => "#8e44ad",
     "orange" => "#d35400",
+    "circles" => "#f4c430",
     "outer" => "#2c3e50",
     "navy" => "#2c3e50",
     "exploration" => "#27ae60",
@@ -349,6 +350,83 @@ function pad_positions_3d(pos)
     end
 end
 
+function subset_sphere_circle_geometry(geometry, keep_indices)
+    geometry === nothing && return nothing
+    idx = Int.(collect(keep_indices))
+    out = Dict{String,Any}(
+        "centers" => geometry["centers"][idx, :],
+        "normals" => geometry["normals"][idx, :],
+        "radii" => geometry["radii"][idx],
+        "offsets" => geometry["offsets"][idx],
+        "sphere_radius" => geometry["sphere_radius"],
+        "projection_scale" => get(geometry, "projection_scale", 1.0),
+        "projection" => get(geometry, "projection", "inverse_stereographic"),
+    )
+    if haskey(geometry, "outer_geometry")
+        out["outer_geometry"] = geometry["outer_geometry"]
+    end
+    return out
+end
+
+function scale_sphere_circle_geometry(geometry, scale::Real)
+    geometry === nothing && return nothing
+    sf = float(scale)
+    return Dict{String,Any}(
+        "centers" => sf .* Float64.(geometry["centers"]),
+        "normals" => Float64.(geometry["normals"]),
+        "radii" => sf .* Float64.(geometry["radii"]),
+        "offsets" => Float64.(geometry["offsets"]),
+        "sphere_radius" => sf * float(geometry["sphere_radius"]),
+        "projection_scale" => get(geometry, "projection_scale", 1.0),
+        "projection" => get(geometry, "projection", "inverse_stereographic"),
+    )
+end
+
+function sphere_circle_segment_points(geometry; segments::Integer=128)
+    geometry === nothing && return zeros(Float32, 0, 3)
+    seg_count = Int(segments)
+    seg_count >= 8 || throw(ArgumentError("segments must be at least 8"))
+
+    centers = Float64.(geometry["centers"])
+    normals = Float64.(geometry["normals"])
+    radii = Float64.(geometry["radii"])
+    size(centers, 1) == size(normals, 1) == length(radii) || throw(ArgumentError("sphere circle geometry arrays must align"))
+
+    rows = Float32[]
+    sizehint!(rows, 6 * seg_count * size(centers, 1))
+
+    for i in 1:size(centers, 1)
+        radius = radii[i]
+        radius > 0.0 || continue
+        isfinite(radius) || continue
+
+        normal = normals[i, :]
+        nlen = norm(normal)
+        nlen > 0.0 || continue
+        n = normal ./ nlen
+        center = centers[i, :]
+
+        ref = abs(n[3]) < 0.9 ? [0.0, 0.0, 1.0] : [1.0, 0.0, 0.0]
+        u = cross(n, ref)
+        ulen = norm(u)
+        ulen > 0.0 || continue
+        u ./= ulen
+        v = cross(n, u)
+
+        prev = center .+ radius .* u
+        for j in 1:seg_count
+            θ = 2π * j / seg_count
+            current = center .+ radius .* (cos(θ) .* u .+ sin(θ) .* v)
+            append!(rows, Float32.(prev))
+            append!(rows, Float32.(current))
+            prev = current
+        end
+    end
+
+    isempty(rows) && return zeros(Float32, 0, 3)
+    return Matrix{Float32}(permutedims(reshape(rows, 3, :)))
+end
+
 @inline _edge_key(u::Integer, v::Integer) = Int(u) <= Int(v) ? (Int32(u), Int32(v)) : (Int32(v), Int32(u))
 
 @inline function _row_is_finite(pos::AbstractMatrix, idx::Integer)
@@ -413,6 +491,382 @@ function _triangle_edge_midpoint_segments(pos::AbstractMatrix, triangles::Abstra
     return Matrix{Float32}(permutedims(reshape(rows, d, :)))
 end
 
+function _contracted_exploration_loop_segments_2d(pos::AbstractMatrix, loop_edges)
+    loops = sanitize_edge_array(loop_edges)
+    size(loops, 1) == 0 && return zeros(Float32, 0, 2)
+    posf = Float32.(pos)
+    rows = Float32[]
+
+    @inbounds for i in 1:size(loops, 1)
+        u = Int(loops[i, 1]) + 1
+        v = Int(loops[i, 2]) + 1
+        (1 <= u <= size(posf, 1) && 1 <= v <= size(posf, 1)) || continue
+        (_row_is_finite(posf, u) && _row_is_finite(posf, v)) || continue
+
+        pu = Float64.(@view posf[u, :])
+        pv = Float64.(@view posf[v, :])
+        mid = 0.5 .* (pu .+ pv)
+        dir = pv .- pu
+        len = norm(dir)
+        len > 0.0 || continue
+        tangent = dir ./ len
+        normal = Float64[-tangent[2], tangent[1]]
+        major = 0.18 * len
+        minor = 0.12 * len
+
+        prev = nothing
+        for j in 0:20
+            θ = 2π * j / 20
+            point = mid .+ major * cos(θ) .* tangent .+ minor * sin(θ) .* normal
+            if prev !== nothing
+                append!(rows, Float32.(prev))
+                append!(rows, Float32.(point))
+            end
+            prev = point
+        end
+    end
+
+    isempty(rows) && return zeros(Float32, 0, 2)
+    return Matrix{Float32}(permutedims(reshape(rows, 2, :)))
+end
+
+function _infer_sphere_radius_from_positions(pos::AbstractMatrix)
+    size(pos, 2) == 3 || throw(ArgumentError("sphere radius inference expects 3D positions"))
+    radii = Float64[]
+    sizehint!(radii, size(pos, 1))
+    @inbounds for i in 1:size(pos, 1)
+        _row_is_finite(pos, i) || continue
+        r = norm(Float64.(view(pos, i, :)))
+        (isfinite(r) && r > 0.0) || continue
+        push!(radii, r)
+    end
+    isempty(radii) && return 1.0
+    return sum(radii) / length(radii)
+end
+
+function _triangle_edge_spherical_midpoint_segments(
+    pos::AbstractMatrix,
+    triangles::AbstractMatrix,
+    generic_edges::AbstractMatrix;
+    sphere_radius::Real=1.0,
+)
+    size(pos, 2) == 3 || throw(ArgumentError("spherical exploration segments require 3D positions"))
+    tri = sanitize_triangles(triangles; drop_degenerate=true, deduplicate=false)
+    size(tri, 1) == 0 && return zeros(Float32, 0, 3)
+    gen = sanitize_edge_array(generic_edges)
+    size(gen, 1) == 0 && return zeros(Float32, 0, 3)
+
+    generic_set = Set{NTuple{2,Int32}}()
+    sizehint!(generic_set, size(gen, 1))
+    for i in 1:size(gen, 1)
+        push!(generic_set, _edge_key(gen[i, 1], gen[i, 2]))
+    end
+
+    radius = float(sphere_radius)
+    radius > 0.0 || throw(ArgumentError("sphere radius must be positive"))
+    posf = Float32.(pos)
+    rows = Float32[]
+    sizehint!(rows, 6 * size(tri, 1))
+
+    @inline function _sphere_midpoint(iu::Int, iv::Int)
+        vec = Float64.(@view(posf[iu, :])) .+ Float64.(@view(posf[iv, :]))
+        nrm = norm(vec)
+        nrm > 0.0 || return nothing
+        return Float32.(radius .* (vec ./ nrm))
+    end
+
+    @inbounds for i in 1:size(tri, 1)
+        a = tri[i, 1]
+        b = tri[i, 2]
+        c = tri[i, 3]
+        keys = (_edge_key(a, b), _edge_key(b, c), _edge_key(c, a))
+        flags = (keys[1] in generic_set, keys[2] in generic_set, keys[3] in generic_set)
+        nflags = Int(flags[1]) + Int(flags[2]) + Int(flags[3])
+        nflags == 2 || continue
+
+        selected = NTuple{2,Int32}[]
+        flags[1] && push!(selected, keys[1])
+        flags[2] && push!(selected, keys[2])
+        flags[3] && push!(selected, keys[3])
+        length(selected) == 2 || continue
+
+        (u0, v0) = selected[1]
+        (u1, v1) = selected[2]
+        iu0 = Int(u0) + 1
+        iv0 = Int(v0) + 1
+        iu1 = Int(u1) + 1
+        iv1 = Int(v1) + 1
+
+        (1 <= iu0 <= size(posf, 1) && 1 <= iv0 <= size(posf, 1) && 1 <= iu1 <= size(posf, 1) && 1 <= iv1 <= size(posf, 1)) || continue
+        (_row_is_finite(posf, iu0) && _row_is_finite(posf, iv0) && _row_is_finite(posf, iu1) && _row_is_finite(posf, iv1)) || continue
+
+        mid0 = _sphere_midpoint(iu0, iv0)
+        mid1 = _sphere_midpoint(iu1, iv1)
+        (mid0 === nothing || mid1 === nothing) && continue
+        append!(rows, mid0)
+        append!(rows, mid1)
+    end
+
+    isempty(rows) && return zeros(Float32, 0, 3)
+    return Matrix{Float32}(permutedims(reshape(rows, 3, :)))
+end
+
+function _contracted_exploration_loop_segments_sphere(pos::AbstractMatrix, loop_edges; sphere_radius::Real=1.0)
+    loops = sanitize_edge_array(loop_edges)
+    size(loops, 1) == 0 && return zeros(Float32, 0, 3)
+    posf = Float32.(pos)
+    radius = float(sphere_radius)
+    rows = Float32[]
+
+    @inbounds for i in 1:size(loops, 1)
+        u = Int(loops[i, 1]) + 1
+        v = Int(loops[i, 2]) + 1
+        (1 <= u <= size(posf, 1) && 1 <= v <= size(posf, 1)) || continue
+        (_row_is_finite(posf, u) && _row_is_finite(posf, v)) || continue
+
+        pu = Float64.(@view posf[u, :])
+        pv = Float64.(@view posf[v, :])
+        mid = pu .+ pv
+        nrm_mid = norm(mid)
+        nrm_mid > 0.0 || continue
+        center_dir = mid ./ nrm_mid
+
+        edge_dir = pv .- pu
+        edge_dir .-= dot(edge_dir, center_dir) .* center_dir
+        edge_norm = norm(edge_dir)
+        edge_norm > 0.0 || continue
+        tangent = edge_dir ./ edge_norm
+        bitangent = cross(center_dir, tangent)
+        bitangent ./= norm(bitangent)
+
+        chord = norm(pv .- pu)
+        α = clamp(0.22 * chord / max(radius, 1.0e-8), 0.05, 0.18)
+
+        prev = nothing
+        for j in 0:24
+            θ = 2π * j / 24
+            vec = cos(α) .* center_dir .+ sin(α) .* (cos(θ) .* tangent .+ sin(θ) .* bitangent)
+            point = Float32.(radius .* (vec ./ norm(vec)))
+            if prev !== nothing
+                append!(rows, prev)
+                append!(rows, point)
+            end
+            prev = point
+        end
+    end
+
+    isempty(rows) && return zeros(Float32, 0, 3)
+    return Matrix{Float32}(permutedims(reshape(rows, 3, :)))
+end
+
+function _exploration_green_edge_pairs(map_data, metadata)
+    pairs = try
+        _metadata_lookup(metadata, "exploration_green_edge_pairs", nothing)
+    catch
+        nothing
+    end
+    if pairs !== nothing
+        return sanitize_edge_array(pairs)
+    elseif map_data isa FKMap
+        return sanitize_edge_array(map_data.triangle_green_edges)
+    end
+    return Matrix{Int32}(undef, 0, 2)
+end
+
+function _exploration_vertex_maps(pos::AbstractMatrix, metadata)
+    current_to_base = Int32.(collect(0:(size(pos, 1) - 1)))
+    kept = try
+        _metadata_lookup(metadata, "gasket_kept_vertex_indices", nothing)
+    catch
+        nothing
+    end
+    if kept !== nothing
+        kept_vec = Int32.(collect(kept))
+        if length(kept_vec) == size(pos, 1)
+            current_to_base = kept_vec
+        end
+    end
+
+    base_to_current = Dict{Int32,Int32}()
+    for (i, base_vertex) in enumerate(current_to_base)
+        base_to_current[base_vertex] = Int32(i - 1)
+    end
+    return current_to_base, base_to_current
+end
+
+function _exploration_pair_point_map(pos::AbstractMatrix, generic_edges::AbstractMatrix, metadata)
+    d = size(pos, 2)
+    current_to_base, _ = _exploration_vertex_maps(pos, metadata)
+    posf = Float32.(pos)
+    points = Dict{Tuple{Int32,Int32},Vector{Float32}}()
+
+    sphere_mode = d == 3 && _metadata_lookup(metadata, "sphere_projection", nothing) == "inverse_stereographic"
+    sphere_radius = sphere_mode ? float(something(
+        try
+            _metadata_lookup(metadata, "sphere_radius", nothing)
+        catch
+            nothing
+        end,
+        _infer_sphere_radius_from_positions(posf),
+    )) : 1.0
+
+    @inbounds for i in 1:size(generic_edges, 1)
+        u = Int(generic_edges[i, 1]) + 1
+        v = Int(generic_edges[i, 2]) + 1
+        (1 <= u <= size(posf, 1) && 1 <= v <= size(posf, 1)) || continue
+        (_row_is_finite(posf, u) && _row_is_finite(posf, v)) || continue
+
+        base_u = current_to_base[u]
+        base_v = current_to_base[v]
+        key = _edge_key(base_u, base_v)
+
+        point = if sphere_mode
+            vec = Float64.(@view(posf[u, :])) .+ Float64.(@view(posf[v, :]))
+            nrm = norm(vec)
+            nrm > 0.0 || continue
+            Float32.(sphere_radius .* (vec ./ nrm))
+        else
+            0.5f0 .* (Float32.(@view(posf[u, :])) .+ Float32.(@view(posf[v, :])))
+        end
+        points[key] = collect(point)
+    end
+
+    return points
+end
+
+function _exploration_walk_components(edge_pairs::AbstractMatrix)
+    pairs = sanitize_edge_array(edge_pairs)
+    size(pairs, 1) == 0 && return Tuple{Vector{Int32},Bool}[]
+
+    incident = Dict{Int32,Vector{Int}}()
+    for i in 1:size(pairs, 1)
+        a = pairs[i, 1]
+        b = pairs[i, 2]
+        a == b && continue
+        push!(get!(incident, a, Int[]), i)
+        push!(get!(incident, b, Int[]), i)
+    end
+
+    used = falses(size(pairs, 1))
+    walks = Tuple{Vector{Int32},Bool}[]
+
+    function other_endpoint(edge_idx::Int, node::Int32)
+        a = pairs[edge_idx, 1]
+        b = pairs[edge_idx, 2]
+        return a == node ? b : a
+    end
+
+    for seed_edge in 1:size(pairs, 1)
+        used[seed_edge] && continue
+        a = pairs[seed_edge, 1]
+        b = pairs[seed_edge, 2]
+        a == b && continue
+
+        component_edges = Int[]
+        component_nodes = Set{Int32}()
+        queue = Int[seed_edge]
+        while !isempty(queue)
+            edge_idx = popfirst!(queue)
+            used[edge_idx] && continue
+            push!(component_edges, edge_idx)
+            used[edge_idx] = true
+            u = pairs[edge_idx, 1]
+            v = pairs[edge_idx, 2]
+            push!(component_nodes, u)
+            push!(component_nodes, v)
+            for node in (u, v)
+                for next_edge in get(incident, node, Int[])
+                    used[next_edge] || push!(queue, next_edge)
+                end
+            end
+        end
+
+        component_used = Set(component_edges)
+        degree = Dict{Int32,Int}(node => 0 for node in component_nodes)
+        for edge_idx in component_edges
+            degree[pairs[edge_idx, 1]] += 1
+            degree[pairs[edge_idx, 2]] += 1
+        end
+
+        start = let degree_one = sort!(Int32[node for (node, deg) in degree if deg == 1])
+            isempty(degree_one) ? minimum(collect(component_nodes)) : degree_one[1]
+        end
+
+        walk = Int32[start]
+        current = start
+        previous_edge = 0
+        while !isempty(component_used)
+            next_edge = 0
+            for edge_idx in get(incident, current, Int[])
+                edge_idx in component_used || continue
+                if previous_edge == 0 || edge_idx != previous_edge || length(component_used) == 1
+                    next_edge = edge_idx
+                    break
+                end
+            end
+            next_edge == 0 && break
+            delete!(component_used, next_edge)
+            current = other_endpoint(next_edge, current)
+            push!(walk, current)
+            previous_edge = next_edge
+        end
+
+        closed = length(walk) >= 2 && walk[end] == walk[1]
+        push!(walks, (walk, closed))
+    end
+
+    return walks
+end
+
+function _fk_exploration_segments(map_data::FKMap, pos::AbstractMatrix, generic_edges::AbstractMatrix, metadata)
+    green_pairs = _exploration_green_edge_pairs(map_data, metadata)
+    size(green_pairs, 1) == 0 && return zeros(Float32, 0, size(pos, 2))
+    generic = sanitize_edge_array(generic_edges)
+    size(generic, 1) == 0 && return zeros(Float32, 0, size(pos, 2))
+
+    point_map = _exploration_pair_point_map(pos, generic, metadata)
+    isempty(point_map) && return zeros(Float32, 0, size(pos, 2))
+
+    rep_map = Dict{Int32,Tuple{Int32,Int32}}()
+    for edge_id in unique(Int32[v for v in vec(green_pairs) if v >= 0])
+        edge_idx = Int(edge_id) + 1
+        edge_idx <= length(map_data.edge_u) || continue
+        key = _edge_key(map_data.edge_u[edge_idx], map_data.edge_v[edge_idx])
+        haskey(point_map, key) || continue
+        rep_map[edge_id] = key
+    end
+
+    rows = Float32[]
+    d = size(pos, 2)
+    for (walk, closed) in _exploration_walk_components(green_pairs)
+        mapped = Tuple{Int32,Int32}[]
+        for edge_id in walk
+            rep = get(rep_map, edge_id, nothing)
+            rep === nothing && continue
+            isempty(mapped) || mapped[end] != rep || continue
+            push!(mapped, rep)
+        end
+        closed && length(mapped) >= 2 && mapped[1] == mapped[end] && pop!(mapped)
+        length(mapped) >= 2 || continue
+
+        for i in 1:(length(mapped) - 1)
+            pa = point_map[mapped[i]]
+            pb = point_map[mapped[i + 1]]
+            append!(rows, pa)
+            append!(rows, pb)
+        end
+        if closed && length(mapped) >= 3
+            pa = point_map[mapped[end]]
+            pb = point_map[mapped[1]]
+            append!(rows, pa)
+            append!(rows, pb)
+        end
+    end
+
+    isempty(rows) && return zeros(Float32, 0, d)
+    return Matrix{Float32}(permutedims(reshape(rows, d, :)))
+end
+
 function exploration_segment_points(map_data=nothing, pos=nothing; edge_groups=nothing, faces=nothing, triangles=nothing, metadata=nothing)
     pos === nothing && return zeros(Float32, 0, 2)
     pos_arr = Float32.(pos)
@@ -422,12 +876,29 @@ function exploration_segment_points(map_data=nothing, pos=nothing; edge_groups=n
 
     should_include_exploration(map_data; edge_groups=edge_groups, metadata=metadata) || return zeros(Float32, 0, d)
 
-    tri = surface_triangles(map_data; faces=faces, triangles=triangles, drop_degenerate=true, deduplicate=true)
-    size(tri, 1) == 0 && return zeros(Float32, 0, d)
-
     groups = grouped_edges(map_data; edge_groups=edge_groups, drop_loops=true)
     generic = get(groups, "generic", _empty_edges())
     size(generic, 1) == 0 && return zeros(Float32, 0, d)
 
-    return _triangle_edge_midpoint_segments(pos_arr, tri, generic)
+    if map_data isa FKMap || _metadata_has(metadata, "exploration_green_edge_pairs")
+        return (map_data isa FKMap) ? _fk_exploration_segments(map_data, pos_arr, generic, metadata) : zeros(Float32, 0, d)
+    end
+
+    tri = surface_triangles(map_data; faces=faces, triangles=triangles, drop_degenerate=true, deduplicate=true)
+    size(tri, 1) == 0 && return zeros(Float32, 0, d)
+
+    if d == 3 && _metadata_lookup(metadata, "sphere_projection", nothing) == "inverse_stereographic"
+        sphere_radius = something(
+            try
+                _metadata_lookup(metadata, "sphere_radius", nothing)
+            catch
+                nothing
+            end,
+            _infer_sphere_radius_from_positions(pos_arr),
+        )
+        return _triangle_edge_spherical_midpoint_segments(pos_arr, tri, generic; sphere_radius=float(sphere_radius))
+    end
+
+    segs = _triangle_edge_midpoint_segments(pos_arr, tri, generic)
+    return segs
 end

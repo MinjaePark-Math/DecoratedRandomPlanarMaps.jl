@@ -50,6 +50,10 @@ function _merge_metadata_preserving_generated!(meta_dict::Dict{String,Any}, meta
         key = string(k)
         if key == "edge_groups"
             continue
+        elseif key == "sphere_circle_geometry"
+            continue
+        elseif key == "exploration_green_edge_pairs"
+            continue
         elseif key == "files"
             if v !== nothing
                 files_dict = meta_dict["files"]
@@ -72,6 +76,7 @@ function export_web_binaries(
     faces=nothing,
     triangles=nothing,
     circle_radii=nothing,
+    sphere_circle_geometry=nothing,
     metadata=nothing,
     write_index_html::Bool=true,
 )
@@ -142,11 +147,47 @@ function export_web_binaries(
         ))
     end
 
+    sphere_circle_file = nothing
+    sphere_circle_caps_file = nothing
+    if sphere_circle_geometry !== nothing
+        circle_segments = sphere_circle_segment_points(sphere_circle_geometry)
+        if size(circle_segments, 1) > 0
+            sphere_circle_file = "data_sphere_circles.bin"
+            _write_line_positions(joinpath(out_path, sphere_circle_file), circle_segments)
+            push!(edge_meta, Dict(
+                "name" => "circles",
+                "file" => sphere_circle_file,
+                "color" => get(EDGE_COLOR_HINTS, "circles", "#f4c430"),
+                "num_edges" => Int(size(circle_segments, 1) ÷ 2),
+                "kind" => "positions",
+                "default_visible" => true,
+            ))
+        end
+
+        centers_f = Float64.(sphere_circle_geometry["centers"])
+        normals_f = Float64.(sphere_circle_geometry["normals"])
+        radii_f = Float64.(collect(sphere_circle_geometry["radii"]))
+        offsets_f = Float64.(collect(sphere_circle_geometry["offsets"]))
+
+        caps = hcat(
+            Float32.(centers_f),
+            Float32.(normals_f),
+            Float32.(reshape(radii_f, :, 1)),
+            Float32.(reshape(offsets_f, :, 1)),
+        )
+        if size(caps, 1) > 0
+            sphere_circle_caps_file = "data_sphere_circle_caps.bin"
+            _write_binary(joinpath(out_path, sphere_circle_caps_file), caps)
+        end
+    end
+
     files_dict = Dict{String,Any}(
         "vertices" => "data_verts.bin",
         "faces" => face_file,
         "exploration" => exploration_file,
         "circle_radii" => radii_file,
+        "sphere_circles" => sphere_circle_file,
+        "sphere_circle_caps" => sphere_circle_caps_file,
     )
 
     param_pairs = _web_parameter_dict(map_data, metadata)
@@ -163,6 +204,13 @@ function export_web_binaries(
         "files" => files_dict,
     )
     _merge_metadata_preserving_generated!(meta_dict, metadata)
+    if sphere_circle_geometry !== nothing
+        meta_dict["sphere_radius"] = sphere_circle_geometry["sphere_radius"]
+        meta_dict["sphere_effective_projection_scale"] = get(sphere_circle_geometry, "projection_scale", get(meta_dict, "sphere_effective_projection_scale", get(meta_dict, "sphere_projection_scale", 1.0)))
+        if !haskey(meta_dict, "sphere_projection_scale")
+            meta_dict["sphere_projection_scale"] = meta_dict["sphere_effective_projection_scale"]
+        end
+    end
 
     open(joinpath(out_path, "web_meta.json"), "w") do io
         print(io, JSON3.write(meta_dict; allow_inf=true))
