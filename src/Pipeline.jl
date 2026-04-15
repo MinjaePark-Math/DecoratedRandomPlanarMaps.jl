@@ -65,8 +65,14 @@ function _canonical_model_type(model_type)
         return "fk"
     elseif raw in ("spanning_tree", "spanningtree", "tree", "tree_decorated_map")
         return "spanning_tree"
+    elseif raw in ("half_plane_meandric", "half_plane_meandric_system", "halfplane_meandric", "halfplane_meandric_system")
+        return "half_plane_meandric"
+    elseif raw in ("uniform_meandric", "uniform_meandric_system", "meandric", "meandric_system")
+        return "uniform_meandric"
+    elseif raw in ("uniform_meander", "meander")
+        return "uniform_meander"
     else
-        valid = join(["uniform", "schnyder", "fk", "spanning_tree"], ", ")
+        valid = join(["uniform", "schnyder", "fk", "spanning_tree", "half_plane_meandric", "uniform_meandric", "uniform_meander"], ", ")
         throw(ArgumentError("unknown model type $(repr(model_type)); expected one of: $valid"))
     end
 end
@@ -108,6 +114,34 @@ function build_map_from_config(model_cfg)
     elseif model_type == "spanning_tree"
         faces === nothing && throw(ArgumentError("model.faces is required"))
         return build_spanning_tree_map(; faces=faces, seed=seed)
+    elseif model_type == "half_plane_meandric"
+        pairs === nothing && throw(ArgumentError("model.pairs or model.order is required"))
+        return build_half_plane_meandric_system(
+            ;
+            order=pairs,
+            boundary_half_length=get(cfg, "boundary_half_length", nothing),
+            seed=seed,
+        )
+    elseif model_type == "uniform_meandric"
+        pairs === nothing && throw(ArgumentError("model.pairs or model.order is required"))
+        return build_uniform_meandric_system(; order=pairs, seed=seed)
+    elseif model_type == "uniform_meander"
+        pairs === nothing && throw(ArgumentError("model.pairs or model.order is required"))
+        temper_schedule = if haskey(cfg, "temper_schedule") && get(cfg, "temper_schedule", nothing) !== nothing
+            Float64[float(v) for v in cfg["temper_schedule"]]
+        else
+            nothing
+        end
+        return build_uniform_meander(
+            ;
+            order=pairs,
+            seed=seed,
+            temper_schedule=temper_schedule,
+            sweeps_per_temperature=_optional_int(get(cfg, "sweeps_per_temperature", nothing)),
+            search_sweeps=_optional_int(get(cfg, "search_sweeps", nothing)),
+            mixing_sweeps=_optional_int(get(cfg, "mixing_sweeps", nothing)),
+            restarts=Int(get(cfg, "restarts", 8)),
+        )
     else
         p = get(cfg, "p", nothing)
         q = get(cfg, "q", nothing)
@@ -148,11 +182,21 @@ end
 
 function _model_metadata_from_config(model_type::AbstractString, model_cfg)
     cfg = _as_string_dict(model_cfg)
+    size_param = if haskey(cfg, "faces")
+        Int(cfg["faces"])
+    elseif haskey(cfg, "pairs")
+        Int(cfg["pairs"])
+    elseif haskey(cfg, "order")
+        Int(cfg["order"])
+    else
+        0
+    end
     md = Dict{String,Any}(
         "model" => string(model_type),
-        "faces" => Int(get(cfg, "faces", 0)),
+        "faces" => size_param,
         "seed" => Int(get(cfg, "seed", 1)),
     )
+    size_param > 0 && (md["pairs"] = size_param)
     if model_type == "fk" || model_type == "spanning_tree"
         if haskey(cfg, "q") && get(cfg, "q", nothing) !== nothing
             md["q"] = float(cfg["q"])
@@ -163,6 +207,12 @@ function _model_metadata_from_config(model_type::AbstractString, model_cfg)
             md["p"] = 0.0
             md["q"] = 0.0
         end
+    elseif model_type == "half_plane_meandric"
+        if haskey(cfg, "boundary_half_length") && get(cfg, "boundary_half_length", nothing) !== nothing
+            md["boundary_half_length"] = Int(cfg["boundary_half_length"])
+        end
+    elseif model_type == "uniform_meander"
+        md["target_loops"] = 1
     end
     return md
 end

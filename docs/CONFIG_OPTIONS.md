@@ -12,9 +12,22 @@
 
 Common keys:
 
-- `type`: `uniform`, `schnyder`, `fk`, `spanning_tree`
-- `faces`: number of faces
+- `type`: `uniform`, `schnyder`, `fk`, `spanning_tree`, `half_plane_meandric`, `uniform_meandric`, `uniform_meander`
 - `seed`: RNG seed
+
+Size keys:
+
+- `faces`: number of faces for `uniform`, `schnyder`, `fk`, `spanning_tree`
+- `pairs` or `order`: meandric size parameter for `half_plane_meandric`, `uniform_meandric`, `uniform_meander`
+
+Meandric-only keys:
+
+- `boundary_half_length`: half-boundary length for `half_plane_meandric`; defaults to about `sqrt(order)`
+- `temper_schedule`: optional list of loop-penalty temperatures in `[0, 1]` for `uniform_meander`
+- `sweeps_per_temperature`: optional number of MCMC sweeps per tempering level for `uniform_meander`
+- `search_sweeps`: optional additional low-temperature sweeps spent searching for a single loop for `uniform_meander`
+- `mixing_sweeps`: optional zero-temperature sweeps performed after a single-loop meander is found
+- `restarts`: optional number of fresh tempered-MCMC restarts for `uniform_meander`
 
 FK-only keys:
 
@@ -79,6 +92,9 @@ Supported layout combinations:
 - `schnyder`: `tutte` or `circle_packing` in 2D, `sfdp` or `circle_packing` in 3D
 - `fk`: `tutte` or `circle_packing` in 2D only with `hc_boundary_mode: h_gasket` or `c_gasket`; `sfdp` or `circle_packing` in 3D
 - `spanning_tree`: `sfdp` or `circle_packing` in 3D only
+- `half_plane_meandric`: `tutte` in 2D only; the boundary is placed by harmonic measure
+- `uniform_meandric`: `sfdp` in 3D only, using the glued-tree auxiliary graph for layout
+- `uniform_meander`: `sfdp` in 3D only, after tempered MCMC finds a single-loop meander
 
 ## `output`
 
@@ -168,6 +184,63 @@ output:
   export_web: ./exports/schnyder_sphere_circle_packing
 ```
 
+### Half-plane meandric 2D
+
+```yaml
+model:
+  type: half_plane_meandric
+  pairs: 200
+  boundary_half_length: 14
+  seed: 7
+
+layout:
+  dimension: 2
+  engine: tutte
+  solver: auto
+
+output:
+  export_web: ./exports/half_plane_meandric_2d
+  preview_svg: ./exports/half_plane_meandric_2d/preview.svg
+```
+
+### Uniform meandric 3D
+
+```yaml
+model:
+  type: uniform_meandric
+  pairs: 200
+  seed: 7
+
+layout:
+  dimension: 3
+  engine: sfdp
+  normalize_scale: 1.0
+
+output:
+  export_web: ./exports/uniform_meandric_3d
+```
+
+### Uniform meander 3D
+
+```yaml
+model:
+  type: uniform_meander
+  pairs: 120
+  seed: 7
+  sweeps_per_temperature: 4
+  search_sweeps: 16
+  mixing_sweeps: 4
+  restarts: 12
+
+layout:
+  dimension: 3
+  engine: sfdp
+  normalize_scale: 1.0
+
+output:
+  export_web: ./exports/uniform_meander_3d
+```
+
 ### Sphere circle packing normalization
 
 ```yaml
@@ -182,6 +255,8 @@ layout:
 - `uniform` with `engine: circle_packing` is rejected
 - `spanning_tree` with `dimension: 2` is rejected
 - FK 2D with `hc_boundary_mode: face` is rejected
+- `half_plane_meandric` with `dimension: 3` is rejected
+- `uniform_meandric` and `uniform_meander` currently reject `engine: circle_packing`
 
 
 ### FK sampling note

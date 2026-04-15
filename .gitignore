@@ -29,3 +29,4 @@ exports/
 *.svg
 web_meta.json
 demo/
+resources/

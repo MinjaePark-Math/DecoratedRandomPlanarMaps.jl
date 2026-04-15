@@ -5,13 +5,178 @@ const EDGE_COLOR_HINTS = Dict(
     "green" => "#1f7a3a",
     "red" => "#c0392b",
     "blue" => "#2980b9",
+    "upper" => "#1f7a3a",
+    "lower" => "#1f7a3a",
+    "tree_upper" => "#1f7a3a",
+    "tree_lower" => "#d35400",
+    "glue_upper" => "#7f8c8d",
+    "glue_lower" => "#95a5a6",
     "purple" => "#8e44ad",
     "orange" => "#d35400",
     "circles" => "#f4c430",
     "outer" => "#2c3e50",
     "navy" => "#2c3e50",
     "exploration" => "#27ae60",
+    # Matches resource/meandric-systems:
+    # palette(cgrad(:darktest, rev=true), 7)[1:5]
+    "zz_loop_1" => "#CC0000",
+    "zz_loop_2" => "#FFA500",
+    "zz_loop_3" => "#B3B300",
+    "zz_loop_4" => "#008000",
+    "zz_loop_5" => "#000080",
 )
+
+const MEANDRIC_HIGHLIGHT_GROUPS = (
+    "zz_loop_1",
+    "zz_loop_2",
+    "zz_loop_3",
+    "zz_loop_4",
+    "zz_loop_5",
+)
+
+const MEANDRIC_LOOP_FADE_PREFIX = "zy_loop_fade_"
+const MEANDRIC_LOOP_COLOR_CUTOFF = length(MEANDRIC_HIGHLIGHT_GROUPS)
+const MEANDRIC_FADE_TARGET_RANK = 300
+
+function _hex_channel_pair_to_int(s::AbstractString, start::Int)
+    return parse(Int, s[start:(start + 1)]; base=16)
+end
+
+function _hex_to_rgb(hex::AbstractString)
+    s = strip(String(hex))
+    startswith(s, "#") && (s = s[2:end])
+    length(s) == 6 || throw(ArgumentError("hex colors must have 6 digits"))
+    return (
+        _hex_channel_pair_to_int(s, 1),
+        _hex_channel_pair_to_int(s, 3),
+        _hex_channel_pair_to_int(s, 5),
+    )
+end
+
+function _rgb_to_hex(rgb::NTuple{3,Int})
+    return "#" * uppercase(string(rgb[1], base=16, pad=2) * string(rgb[2], base=16, pad=2) * string(rgb[3], base=16, pad=2))
+end
+
+function _hex_lerp(a::AbstractString, b::AbstractString, t::Real)
+    ta = clamp(float(t), 0.0, 1.0)
+    ar, ag, ab = _hex_to_rgb(a)
+    br, bg, bb = _hex_to_rgb(b)
+    rgb = (
+        round(Int, (1 - ta) * ar + ta * br),
+        round(Int, (1 - ta) * ag + ta * bg),
+        round(Int, (1 - ta) * ab + ta * bb),
+    )
+    return _rgb_to_hex(rgb)
+end
+
+function _hex_blend_over(fg::AbstractString, bg::AbstractString, alpha::Real)
+    a = clamp(float(alpha), 0.0, 1.0)
+    fr, fg_g, fb = _hex_to_rgb(fg)
+    br, bg_g, bb = _hex_to_rgb(bg)
+    rgb = (
+        round(Int, a * fr + (1 - a) * br),
+        round(Int, a * fg_g + (1 - a) * bg_g),
+        round(Int, a * fb + (1 - a) * bb),
+    )
+    return _rgb_to_hex(rgb)
+end
+
+function _meandric_fade_group_name(rank::Integer)
+    return MEANDRIC_LOOP_FADE_PREFIX * lpad(string(Int(rank)), 4, '0')
+end
+
+function _meandric_fade_fraction(rank::Integer; cutoff::Integer=typemax(Int), start_rank::Integer=length(MEANDRIC_HIGHLIGHT_GROUPS) + 1)
+    lo = max(Int(start_rank), 1)
+    hi = max(lo, Int(cutoff))
+    r = clamp(Int(rank), lo, hi)
+    hi == lo && return 0.0
+    return (r - lo) / (hi - lo)
+end
+
+function _meandric_fade_opacity(rank::Integer; cutoff::Integer=MEANDRIC_FADE_TARGET_RANK, start_rank::Integer=length(MEANDRIC_HIGHLIGHT_GROUPS) + 1)
+    lo = max(Int(start_rank), 1)
+    hi = max(lo, Int(cutoff))
+    r = clamp(Int(rank), lo, hi)
+    hi == lo && return 0.98
+    t = (r - lo) / (hi - lo)
+    return 0.98 - 0.82 * t
+end
+
+function _meandric_fade_width_scale(rank::Integer; cutoff::Integer=MEANDRIC_FADE_TARGET_RANK, start_rank::Integer=length(MEANDRIC_HIGHLIGHT_GROUPS) + 1)
+    lo = max(Int(start_rank), 1)
+    hi = max(lo, Int(cutoff))
+    r = clamp(Int(rank), lo, hi)
+    hi == lo && return 1.55
+    t = (r - lo) / (hi - lo)
+    return 1.55 - 0.45 * t
+end
+
+function _meandric_rank_opacity(rank::Integer; cutoff::Integer=length(MEANDRIC_HIGHLIGHT_GROUPS))
+    cutoff_int = max(1, Int(cutoff))
+    rank_int = clamp(Int(rank), 1, cutoff_int)
+    cutoff_int == 1 && return 1.0
+    return 1.0 - 0.08 * (rank_int - 1) / (cutoff_int - 1)
+end
+
+function _edge_group_style(name::AbstractString)
+    normalized = _normalize_group_string(name)
+
+    if haskey(EDGE_COLOR_HINTS, normalized)
+        if startswith(normalized, "zz_loop_")
+            loop_idx = parse(Int, split(normalized, "_")[end])
+            return (
+                color=EDGE_COLOR_HINTS[normalized],
+                opacity=_meandric_rank_opacity(loop_idx),
+                width_scale=3.9,
+                force_wide=true,
+            )
+        elseif normalized in ("upper", "lower")
+            return (
+                color=EDGE_COLOR_HINTS[normalized],
+                opacity=0.42,
+                width_scale=1.4,
+                force_wide=false,
+            )
+        elseif normalized == "generic"
+            return (
+                color=EDGE_COLOR_HINTS[normalized],
+                opacity=0.8,
+                width_scale=1.2,
+                force_wide=false,
+            )
+        end
+        return (
+            color=EDGE_COLOR_HINTS[normalized],
+            opacity=0.9,
+            width_scale=(normalized in ("red", "blue", "purple", "orange", "green", "navy")) ? 1.8 : 1.0,
+            force_wide=false,
+        )
+    end
+
+    fade_match = match(r"^zy_loop_fade_(\d+)$", normalized)
+    if fade_match !== nothing
+        rank = parse(Int, fade_match.captures[1])
+        t = _meandric_fade_fraction(rank; cutoff=MEANDRIC_FADE_TARGET_RANK)
+        return (
+            color=_hex_lerp("#87CEEB", "#800080", t),
+            opacity=_meandric_fade_opacity(rank; cutoff=MEANDRIC_FADE_TARGET_RANK),
+            width_scale=_meandric_fade_width_scale(rank; cutoff=MEANDRIC_FADE_TARGET_RANK),
+            force_wide=true,
+        )
+    end
+
+    return (
+        color="#2c3e50",
+        opacity=0.9,
+        width_scale=1.0,
+        force_wide=false,
+    )
+end
+
+edge_group_color(name::AbstractString) = _edge_group_style(name).color
+edge_group_opacity(name::AbstractString) = _edge_group_style(name).opacity
+edge_group_width_scale(name::AbstractString) = _edge_group_style(name).width_scale
+edge_group_force_wide(name::AbstractString) = _edge_group_style(name).force_wide
 
 function sanitize_triangles(triangles; drop_degenerate::Bool=true, deduplicate::Bool=true)
     arr = Int32.(triangles)
@@ -94,6 +259,8 @@ function surface_triangles(map_data=nothing; faces=nothing, triangles=nothing, d
     elseif map_data isa FKMap
         return sanitize_triangles(map_data.triangulation_faces; drop_degenerate=drop_degenerate, deduplicate=deduplicate)
     elseif map_data isa UniformMap || map_data isa SchnyderMap
+        return fan_triangulate_faces(map_data.faces; drop_degenerate=drop_degenerate, deduplicate=deduplicate)
+    elseif map_data isa UniformMeandricSystemMap
         return fan_triangulate_faces(map_data.faces; drop_degenerate=drop_degenerate, deduplicate=deduplicate)
     else
         return _empty_triangles()
@@ -210,7 +377,12 @@ function model_parameter_string(map_data=nothing; metadata=nothing)
 end
 
 function model_display_name(map_data=nothing; metadata=nothing)
-    model = lowercase(strip(string(something(_metadata_lookup(metadata, "model", nothing), map_data isa UniformMap ? "uniform" : map_data isa SchnyderMap ? "schnyder" : map_data isa FKMap ? "fk" : "map"))))
+    default_model = map_data isa HalfPlaneMeandricSystemMap ? "half_plane_meandric" :
+                    map_data isa UniformMeandricSystemMap ? _meandric_model_name(map_data) :
+                    map_data isa UniformMap ? "uniform" :
+                    map_data isa SchnyderMap ? "schnyder" :
+                    map_data isa FKMap ? "fk" : "map"
+    model = lowercase(strip(string(something(_metadata_lookup(metadata, "model", nothing), default_model))))
     if model == "fk"
         variant_val = _metadata_lookup(metadata, "variant", nothing)
         if variant_val == "spanning_tree"
@@ -268,6 +440,63 @@ function _sanitize_edge_group_dict(edge_groups::Dict{String,<:Any}; drop_loops::
     return out
 end
 
+function _meandric_component_labels(map_data::HalfPlaneMeandricSystemMap)
+    labels, component_sizes = _meandric_component_labels_and_sizes(map_data.upper_adj, map_data.lower_adj)
+    excluded_labels = _component_labels_touching_vertices(labels, map_data.boundary_vertices)
+    return labels, component_sizes, excluded_labels
+end
+
+function _meandric_component_labels(map_data::UniformMeandricSystemMap)
+    labels, component_sizes = _meandric_component_labels_and_sizes(map_data.upper_adj, map_data.lower_adj)
+    return labels, component_sizes, Set{Int32}()
+end
+
+function _append_meandric_highlights!(out::Dict{String,Matrix{Int32}}, map_data::Union{HalfPlaneMeandricSystemMap,UniformMeandricSystemMap})
+    labels, component_sizes, excluded_labels = _meandric_component_labels(map_data)
+    ranked_labels = _sorted_meandric_component_labels(component_sizes; excluded_labels=excluded_labels)
+    isempty(ranked_labels) && return out
+
+    top_count = min(length(ranked_labels), length(MEANDRIC_HIGHLIGHT_GROUPS))
+    root_to_group = Dict{Int32,String}()
+    highlighted = Dict{String,Vector{NTuple{2,Int32}}}()
+
+    for i in 1:top_count
+        group = MEANDRIC_HIGHLIGHT_GROUPS[i]
+        root_to_group[ranked_labels[i]] = group
+        highlighted[group] = NTuple{2,Int32}[]
+    end
+
+    if length(ranked_labels) > top_count
+        for rank_idx in (top_count + 1):length(ranked_labels)
+            group = _meandric_fade_group_name(rank_idx)
+            root_to_group[ranked_labels[rank_idx]] = group
+            highlighted[group] = NTuple{2,Int32}[]
+        end
+    end
+
+    for i in eachindex(map_data.edge_u)
+        group = _normalize_group_string(map_data.edge_group[i])
+        group in ("upper", "lower") || continue
+        u = map_data.edge_u[i]
+        v = map_data.edge_v[i]
+        labels[Int(u) + 1] == labels[Int(v) + 1] || continue
+        highlight_group = get(root_to_group, labels[Int(u) + 1], nothing)
+        highlight_group === nothing && continue
+        push!(highlighted[highlight_group], (u, v))
+    end
+
+    for (name, edges_raw) in highlighted
+        isempty(edges_raw) && continue
+        arr = Matrix{Int32}(undef, length(edges_raw), 2)
+        for (i, (u, v)) in enumerate(edges_raw)
+            arr[i, 1] = u
+            arr[i, 2] = v
+        end
+        out[name] = arr
+    end
+    return out
+end
+
 function grouped_edges(map_data=nothing; edge_groups=nothing, drop_loops::Bool=true)
     if edge_groups !== nothing
         fk_like = should_include_exploration(map_data; edge_groups=edge_groups)
@@ -284,7 +513,12 @@ function grouped_edges(map_data=nothing; edge_groups=nothing, drop_loops::Bool=t
                 d[name] = arr
             end
         end
-        return _sanitize_edge_group_dict(d; drop_loops=drop_loops)
+        out = _sanitize_edge_group_dict(d; drop_loops=drop_loops)
+        if map_data isa HalfPlaneMeandricSystemMap || map_data isa UniformMeandricSystemMap
+            _append_meandric_highlights!(out, map_data)
+            out = _sanitize_edge_group_dict(out; drop_loops=drop_loops)
+        end
+        return out
     end
 
     if map_data === nothing
@@ -302,6 +536,28 @@ function grouped_edges(map_data=nothing; edge_groups=nothing, drop_loops::Bool=t
             out[name] = arr
         end
         return out
+    elseif map_data isa HalfPlaneMeandricSystemMap || map_data isa UniformMeandricSystemMap
+        temp = Dict{String,Vector{NTuple{2,Int32}}}()
+        for i in eachindex(map_data.edge_u)
+            u = map_data.edge_u[i]
+            v = map_data.edge_v[i]
+            if drop_loops && u == v
+                continue
+            end
+            group = _normalize_group_string(map_data.edge_group[i])
+            push!(get!(temp, group, NTuple{2,Int32}[]), (u, v))
+        end
+        out = Dict{String,Matrix{Int32}}()
+        for (name, edges_raw) in temp
+            arr = Matrix{Int32}(undef, length(edges_raw), 2)
+            for (i, (u, v)) in enumerate(edges_raw)
+                arr[i, 1] = u
+                arr[i, 2] = v
+            end
+            out[name] = arr
+        end
+        _append_meandric_highlights!(out, map_data)
+        return _sanitize_edge_group_dict(out; drop_loops=drop_loops)
     elseif map_data isa SchnyderMap
         temp = Dict{String,Vector{NTuple{2,Int32}}}()
         for i in eachindex(map_data.edge_u)

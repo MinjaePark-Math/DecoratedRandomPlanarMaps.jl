@@ -177,14 +177,10 @@ function export_svg_preview(
         for (name, edge_array) in sort!(collect(groups); by=first)
             filtered = _filter_edge_array_by_mask(edge_array, validmask)
             size(filtered, 1) == 0 && continue
-            color = get(EDGE_COLOR_HINTS, name, "#2c3e50")
-            width = size(filtered, 1) > 250_000 ? 0.25 : 0.7
-            if name in ("red", "blue", "purple", "orange", "green", "navy")
-                width *= 1.8
-            elseif name == "generic"
-                width *= 1.2
-            end
-            println(io, """<g stroke=\"$color\" stroke-width=\"$width\" stroke-opacity=\"0.9\" fill=\"none\">""")
+            color = edge_group_color(name)
+            opacity = edge_group_opacity(name)
+            width = (size(filtered, 1) > 250_000 ? 0.25 : 0.7) * edge_group_width_scale(name)
+            println(io, """<g stroke=\"$color\" stroke-width=\"$width\" stroke-opacity=\"$opacity\" fill=\"none\">""")
             for i in 1:size(filtered, 1)
                 u = Int(filtered[i, 1]) + 1
                 v = Int(filtered[i, 2]) + 1

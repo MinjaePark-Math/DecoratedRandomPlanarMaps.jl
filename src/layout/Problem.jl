@@ -253,6 +253,63 @@ function _fan_triangulate_faces_with_face_edge_ids(faces, face_edge_ids; next_sy
     return sanitize_triangles(tri; drop_degenerate=drop_degenerate, deduplicate=false), tri_ids
 end
 
+function _undirected_edge_key_set(edges)
+    arr = sanitize_edge_array(edges)
+    keys = Set{Tuple{Int32,Int32}}()
+    for i in 1:size(arr, 1)
+        u = arr[i, 1]
+        v = arr[i, 2]
+        u == v && continue
+        push!(keys, (min(u, v), max(u, v)))
+    end
+    return keys
+end
+
+function _map_render_edges_to_auxiliary(edge_array, render_vertex_indices)
+    arr = sanitize_edge_array(edge_array)
+    size(arr, 1) == 0 && return Matrix{Int32}(undef, 0, 2)
+
+    interface = Int32.(collect(render_vertex_indices))
+    mapped = Matrix{Int32}(undef, size(arr, 1), 2)
+    for i in 1:size(arr, 1)
+        mapped[i, 1] = interface[Int(arr[i, 1]) + 1]
+        mapped[i, 2] = interface[Int(arr[i, 2]) + 1]
+    end
+    return _deduplicate_undirected_edges(mapped)
+end
+
+function _augment_closed_meandric_sfdp_graph(map_data::UniformMeandricSystemMap, triangles)
+    base_edges = auxiliary_layout_edges(map_data; drop_loops=true)
+    render_support_edges = _map_render_edges_to_auxiliary(layout_edges(map_data; drop_loops=true), map_data.render_vertex_indices)
+    triangulation_edges = _map_render_edges_to_auxiliary(_triangle_edge_array(triangles), map_data.render_vertex_indices)
+
+    final_edges = first(collapse_undirected_edges(vcat(base_edges, render_support_edges, triangulation_edges); drop_loops=true))
+
+    base_keys = _undirected_edge_key_set(base_edges)
+    support_keys = _undirected_edge_key_set(render_support_edges)
+    triangulation_keys = _undirected_edge_key_set(triangulation_edges)
+    final_keys = _undirected_edge_key_set(final_edges)
+
+    triangulation_only = Set{Tuple{Int32,Int32}}()
+    for edge in triangulation_keys
+        (edge in base_keys || edge in support_keys) && continue
+        push!(triangulation_only, edge)
+    end
+
+    metadata = Dict{String,Any}(
+        "layout_graph" => "glued_trees_augmented",
+        "layout_graph_base" => "glued_trees",
+        "layout_graph_support" => "render_edges",
+        "layout_graph_augmentation" => "triangulated_faces",
+        "layout_base_edge_count" => length(base_keys),
+        "layout_render_support_edge_count" => length(support_keys),
+        "layout_triangulation_edge_count" => length(triangulation_keys),
+        "layout_temporary_triangulation_edge_count" => length(triangulation_only),
+        "layout_augmented_edge_count" => length(final_keys),
+    )
+    return final_edges, metadata
+end
+
 function _pinched_quad_collapsed_edge(face)
     verts = Int32.(collect(face))
     length(verts) == 4 || return nothing
@@ -2215,6 +2272,78 @@ function _prepare_uniform_problem(map_data::UniformMap; dimension::Int, boundary
     )
 end
 
+function _prepare_half_plane_meandric_problem(
+    map_data::HalfPlaneMeandricSystemMap;
+    dimension::Int,
+    engine=nothing,
+)
+    dimension == 2 || throw(ArgumentError("half-plane meandric systems currently support only `dimension: 2` with a Tutte embedding"))
+
+    layout_engine = lowercase(strip(string(something(engine, "tutte"))))
+    layout_engine == "tutte" || throw(ArgumentError("half-plane meandric systems currently support only `layout.engine: tutte`"))
+
+    return LayoutProblem(
+        num_vertices=num_vertices(map_data),
+        edges=layout_edges(map_data; drop_loops=true),
+        edge_groups=grouped_edges(map_data),
+        boundary_vertices=copy(map_data.boundary_vertices),
+        metadata=Dict(
+            "model" => "half_plane_meandric",
+            "dimension" => 2,
+            "boundary_half_length" => Int(map_data.boundary_half_length),
+            "boundary_position_source" => "harmonic_measure",
+            "raw_component_sizes" => Int.(map_data.raw_component_sizes),
+            "linked_component_sizes" => Int.(map_data.linked_component_sizes),
+            "cle_component_sizes" => Int.(map_data.cle_component_sizes),
+            "linked_interface" => map_data.linked_interface === nothing ? nothing : Int[map_data.linked_interface[1], map_data.linked_interface[2]],
+        ),
+        render_map_data=map_data,
+    )
+end
+
+function _prepare_closed_meandric_problem(
+    map_data::UniformMeandricSystemMap;
+    dimension::Int,
+    engine=nothing,
+)
+    dimension == 3 || throw(ArgumentError("closed meandric systems currently support only `dimension: 3`; use `layout.engine: sfdp`"))
+
+    layout_engine = lowercase(strip(string(something(engine, "sfdp"))))
+    layout_engine == "sfdp" || throw(ArgumentError("closed meandric systems currently support only `layout.engine: sfdp`; circle packing needs a sphere triangulation that is not wired in yet"))
+
+    faces = [Int32.(collect(face)) for face in map_data.faces]
+    triangles, triangle_edge_ids = _fan_triangulate_faces_with_face_edge_ids(
+        faces,
+        map_data.face_edge_ids;
+        next_synthetic=length(map_data.face_edge_group),
+        drop_degenerate=true,
+    )
+    layout_edges_augmented, layout_meta = _augment_closed_meandric_sfdp_graph(map_data, triangles)
+    metadata = Dict{String,Any}(
+        "model" => _meandric_model_name(map_data),
+        "dimension" => 3,
+        "num_loops" => num_loops(map_data),
+        "component_sizes" => Int.(map_data.component_sizes),
+        "num_faces" => length(faces),
+        "upper_face_count" => Int(map_data.order) + 1,
+        "lower_face_count" => Int(map_data.order) + 1,
+    )
+    merge!(metadata, layout_meta)
+    merge!(metadata, map_data.sampler_metadata)
+
+    return LayoutProblem(
+        num_vertices=Int(map_data.auxiliary_num_vertices),
+        edges=layout_edges_augmented,
+        edge_groups=grouped_edges(map_data),
+        faces=faces,
+        surface_triangles=triangles,
+        surface_triangle_edge_ids=triangle_edge_ids,
+        metadata=metadata,
+        render_map_data=map_data,
+        render_vertex_indices=copy(map_data.render_vertex_indices),
+    )
+end
+
 _hc_variant(map_data::FKMap) = variant(map_data)
 
 function _hc_gasket_selection(map_data::FKMap, gasket::AbstractString)
@@ -2536,6 +2665,18 @@ function prepare_layout_problem(map_data; dimension::Integer, boundary_scale=not
             dimension=dim,
             boundary_scale=scale,
             outer_face_index=get(opts, "outer_face_index", nothing),
+            engine=get(opts, "engine", nothing),
+        )
+    elseif map_data isa HalfPlaneMeandricSystemMap
+        return _prepare_half_plane_meandric_problem(
+            map_data;
+            dimension=dim,
+            engine=get(opts, "engine", nothing),
+        )
+    elseif map_data isa UniformMeandricSystemMap
+        return _prepare_closed_meandric_problem(
+            map_data;
+            dimension=dim,
             engine=get(opts, "engine", nothing),
         )
     else

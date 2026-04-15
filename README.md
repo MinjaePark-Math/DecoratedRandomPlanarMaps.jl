@@ -48,14 +48,18 @@ If you use `DecoratedRandomPlanarMaps.jl` in your research or course materials, 
 
 ## Supported Models
 
-The package currently supports four families of decorated random planar maps:
+The package currently supports five families of decorated random planar maps:
 - `uniform` — uniform quadrangulations
 - `schnyder` — Schnyder-wood-decorated triangulations
 - `fk` — FK-decorated maps with parameter `q` (or `p` from the Hamburger-Cheeseburger bijection). For 2D layouts, the boundary is chosen from an `h_gasket` or `c_gasket`.
 - `spanning_tree` — the FK model in the special case where `p = 0`
+- `meandric` — uniform meanders, uniform meandric systems, and half-plane meandric systems
 
 **Note on FK Sampling Limitations:**
 With the exception of the spanning tree case (`p = 0`), FK-decorated maps are not sampled exactly. Instead, they are approximated using a Markov Chain Monte Carlo (MCMC) algorithm. Users should be aware that the accuracy of this approximation currently degrades for larger values of `p`.
+
+**Note on Meander Sampling:**
+Closed uniform meandric systems are sampled exactly from two independent uniform noncrossing matchings. Uniform meanders are currently sampled using a tempered MCMC procedure on the space of meandric systems, so large orders may require tuning `restarts`, `search_sweeps`, `descent_sweeps`, or `sweeps_per_temperature`.
 
 ## Supported Layout Engines
 
@@ -69,12 +73,14 @@ Supported model/layout combinations:
 - `schnyder`: `tutte` or `circle_packing` in 2D, `sfdp` or `circle_packing` in 3D
 - `fk`: `tutte` or `circle_packing` in 2D only with `hc_boundary_mode: h_gasket` or `c_gasket`; `sfdp` or `circle_packing` in 3D
 - `spanning_tree`: `sfdp` or `circle_packing` in 3D only
+- `meandric`: `tutte` in 2D for half-plane meandric systems; `sfdp` in 3D for closed uniform meandric systems and uniform meanders
 
 ## Future Implementations
 
-- `mated_crt`— Mated-CRT (continuum-random-tree) maps
+- `mated_crt` — Mated-CRT (continuum-random-tree) maps
 - `bipolar` — Bipolar-orientation-decorated maps
-- `meandric` — Random geometry of meanders or meandric systems, including half-plane and uniform variants
+- `loop` — Various loop-decorated maps, such as O(n) models
+- `supercritical` — supercritical LQG models
 
 **Feature Requests & Collaboration:**
 I am open to implementing additional models and layout algorithms. Please feel free to [reach out via email](mailto:minjaep@auburn.edu) for assistance, feature requests, or research collaboration.
@@ -103,7 +109,7 @@ Pkg.add(["GLMakie", "GeometryBasics"])
 ## Package structure
 
 - `src/core` — shared interfaces, half-edge storage, sparse graph helpers, samplers, timings
-- `src/models` — uniform, Schnyder, and FK / spanning-tree constructions
+- `src/models` — uniform, Schnyder, FK / spanning-tree, and meandric constructions
 - `src/layout` — model-specific layout-problem preparation, Tutte, circle packing, and SFDP
 - `src/render` — common geometry helpers, web export, SVG preview, STL export
 - `ext` — optional GLMakie renderer extension
@@ -197,6 +203,8 @@ Use the `examples/` directory for copy-pasteable workflows:
 - `examples/schnyder_examples.jl`
 - `examples/fk_examples.jl`
 - `examples/spanning_tree_examples.jl`
+- `examples/meandric.jl`
+- `examples/meandric_arc_diagrams.jl`
 - `examples/circle_packing.jl`
 - `examples/demo.jl`
 

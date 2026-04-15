@@ -18,6 +18,7 @@ include("core/Timing.jl")
 include("models/Uniform.jl")
 include("models/Schnyder.jl")
 include("models/FK.jl")
+include("models/Meandric.jl")
 
 include("render/Common.jl")
 include("render/STL.jl")
@@ -42,6 +43,11 @@ export FKMap, FKDecoratedMap, HCMap, SpanningTreeMap, build_fk_map, generate_fk_
 export build_hc_map, build_hc_map_from_word, sample_fk_word, sample_hc_word,
     sample_fk_word_exact_rejection, sample_hc_word_exact_rejection,
     estimate_fk_exact_rejection_acceptance, recommended_fk_approx_sampler_params
+export HalfPlaneMeandricSystemMap, HalfPlaneMeandricMap,
+    UniformMeandricSystemMap, UniformMeandricMap, UniformMeanderMap,
+    build_half_plane_meandric_system, generate_half_plane_meandric_system,
+    build_uniform_meandric_system, generate_uniform_meandric_system,
+    build_uniform_meander, generate_uniform_meander
 export LayoutProblem, prepare_layout_problem
 export DirichletSolveInfo, solve_dirichlet_laplacian, harmonic_measure_boundary_positions
 export compute_tutte_layout, compute_circle_packing_layout, compute_sfdp_layout

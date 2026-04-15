@@ -135,6 +135,26 @@
       });
     }
 
+    const legendGroups = new Map();
+
+    function addGroupedLegendToggle(name, object3d, color, checked = true) {
+      const key = String(name);
+      if (legendGroups.has(key)) {
+        const entry = legendGroups.get(key);
+        entry.group.add(object3d);
+        object3d.visible = entry.group.visible;
+        return entry.group;
+      }
+      const group = new THREE.Group();
+      group.name = key;
+      group.visible = checked;
+      group.add(object3d);
+      legendGroups.set(key, { group, color, checked });
+      scene.add(group);
+      addLegendToggle(key, group, color, checked);
+      return group;
+    }
+
     function expandFlatToXYZ(raw, dimension) {
       if (dimension === 3) {
         if (raw.length % 3 !== 0) {
@@ -383,6 +403,24 @@
       return new THREE.LineSegments(geometry, material);
     }
 
+    function createColoredSegmentLines(positions, colors, {
+      linewidth = 1.0,
+      depthTest = true,
+      opacity = 1.0,
+      transparent = false,
+    } = {}) {
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+      const material = new THREE.LineBasicMaterial({
+        vertexColors: true,
+        depthTest,
+        transparent,
+        opacity,
+      });
+      return new THREE.LineSegments(geometry, material);
+    }
+
     function createPolylineLine(positions, color, {
       linewidth = 3.0,
       depthTest = true,
@@ -468,6 +506,35 @@
 
     function buildIndexedEdgeArcPositions(indices, vertsXYZ, sphereRadius, segments = 28, radialScale = 1.0) {
       return buildGeodesicEdgeArcPositions(indices, vertsXYZ, sphereRadius, segments, radialScale);
+    }
+
+    function expandEdgeColorsToVertexColors(edgeColors) {
+      const out = new Float32Array(edgeColors.length * 2);
+      for (let i = 0, j = 0; i + 2 < edgeColors.length; i += 3) {
+        out[j++] = edgeColors[i + 0];
+        out[j++] = edgeColors[i + 1];
+        out[j++] = edgeColors[i + 2];
+        out[j++] = edgeColors[i + 0];
+        out[j++] = edgeColors[i + 1];
+        out[j++] = edgeColors[i + 2];
+      }
+      return out;
+    }
+
+    function expandEdgeColorsToArcVertexColors(edgeColors, segments = 28) {
+      const segs = Math.max(1, Math.floor(segments));
+      const out = new Float32Array(edgeColors.length * 2 * segs);
+      let j = 0;
+      for (let i = 0; i + 2 < edgeColors.length; i += 3) {
+        const r = edgeColors[i + 0];
+        const g = edgeColors[i + 1];
+        const b = edgeColors[i + 2];
+        for (let k = 0; k < segs; ++k) {
+          out[j++] = r; out[j++] = g; out[j++] = b;
+          out[j++] = r; out[j++] = g; out[j++] = b;
+        }
+      }
+      return out;
     }
 
     function buildPositionSegmentArcPositions(flatXYZ, sphereRadius, segments = 28, radialScale = 1.0) {
@@ -938,13 +1005,13 @@
       }
     }
 
-    for (const group of meta.edge_groups ?? []) {
-      let geometry;
+      for (const group of meta.edge_groups ?? []) {
+        let geometry;
 
-      if ((group.kind ?? 'index_pairs') === 'positions') {
-        const raw = await fetchArray(group.file, Float32Array);
-        let pos = filterPositionSegments(expandFlatToXYZ(raw, meta.dimension));
-        if (sphereProjection && sphereRadius) {
+        if ((group.kind ?? 'index_pairs') === 'positions') {
+          const raw = await fetchArray(group.file, Float32Array);
+          let pos = filterPositionSegments(expandFlatToXYZ(raw, meta.dimension));
+          if (sphereProjection && sphereRadius) {
           if (group.name === 'circles') {
             const circleGroup = new THREE.Group();
             const paths = (sphereCircleCaps && sphereCircleCaps.length >= 8)
@@ -954,13 +1021,13 @@
               if (!path.length) {
                 continue;
               }
-              const line = createPolylineLine(path, group.color ?? '#f4c430', {
-                linewidth: 3.4,
-                depthTest: true,
-                transparent: false,
-                opacity: 1.0,
-                closed: true,
-              });
+            const line = createPolylineLine(path, group.color ?? '#f4c430', {
+              linewidth: group.linewidth ?? 3.4,
+              depthTest: true,
+              transparent: (group.opacity ?? 1.0) < 0.999,
+              opacity: group.opacity ?? 1.0,
+              closed: true,
+            });
               line.renderOrder = 5;
               circleGroup.add(line);
             }
@@ -972,10 +1039,10 @@
                 outerPath.push(outer[i + 0], outer[i + 1], outer[i + 2]);
               }
               const line = createPolylineLine(new Float32Array(outerPath), group.color ?? '#f4c430', {
-                linewidth: 3.4,
+                linewidth: group.linewidth ?? 3.4,
                 depthTest: true,
-                transparent: false,
-                opacity: 1.0,
+                transparent: (group.opacity ?? 1.0) < 0.999,
+                opacity: group.opacity ?? 1.0,
                 closed: true,
               });
               line.renderOrder = 5;
@@ -985,8 +1052,7 @@
               sphereCircleOverlay.add(circleGroup);
               continue;
             }
-            scene.add(circleGroup);
-            addLegendToggle(group.name, circleGroup, group.color ?? '#f4c430', group.default_visible ?? true);
+            addGroupedLegendToggle(group.legend_name ?? group.name, circleGroup, group.color ?? '#f4c430', group.default_visible ?? true);
             continue;
           } else {
             pos = buildPositionSegmentArcPositions(pos, sphereRadius, group.name === 'exploration' ? 28 : 20, SPHERE_EDGE_SCALE);
@@ -994,27 +1060,51 @@
         }
         if (!pos.length) {
           continue;
-        }
-        geometry = pos;
-      } else {
-        const data = await fetchArray(group.file, Uint32Array);
-        const positions = (sphereProjection && sphereRadius)
-          ? buildIndexedEdgeArcPositions(data, sphereEdgeVerts, sphereRadius, 18, SPHERE_EDGE_SCALE)
-          : buildIndexedEdgePositions(data, verts);
+          }
+          geometry = pos;
+        } else if ((group.kind ?? 'index_pairs') === 'colored_index_pairs') {
+          const data = await fetchArray(group.file, Uint32Array);
+          const edgeColors = group.color_file ? await fetchArray(group.color_file, Float32Array) : null;
+          const arcSegments = 18;
+          const positions = (sphereProjection && sphereRadius)
+            ? buildIndexedEdgeArcPositions(data, sphereEdgeVerts, sphereRadius, arcSegments, SPHERE_EDGE_SCALE)
+            : buildIndexedEdgePositions(data, verts);
+          const colors = edgeColors
+            ? ((sphereProjection && sphereRadius)
+              ? expandEdgeColorsToArcVertexColors(edgeColors, arcSegments)
+              : expandEdgeColorsToVertexColors(edgeColors))
+            : null;
+          if (!positions.length || !colors || !colors.length) {
+            continue;
+          }
+          geometry = createColoredSegmentLines(positions, colors, {
+            linewidth: group.linewidth ?? 1.15,
+            depthTest: !is2D,
+            transparent: (group.opacity ?? 1.0) < 0.999,
+            opacity: group.opacity ?? 1.0,
+          });
+          addGroupedLegendToggle(group.legend_name ?? group.name, geometry, group.color ?? '#8A4FB3', group.default_visible ?? true);
+          continue;
+        } else {
+          const data = await fetchArray(group.file, Uint32Array);
+          const positions = (sphereProjection && sphereRadius)
+            ? buildIndexedEdgeArcPositions(data, sphereEdgeVerts, sphereRadius, 18, SPHERE_EDGE_SCALE)
+            : buildIndexedEdgePositions(data, verts);
         if (!positions.length) {
           continue;
         }
         geometry = positions;
       }
 
-      const useWide = sphereProjection;
-      const wideWidth = group.name === 'exploration' ? 4.2 : (group.name === 'circles' ? 3.4 : 3.2);
+      const useWide = sphereProjection || !!group.wide;
+      const wideWidth = group.linewidth ?? (group.name === 'exploration' ? 4.2 : (group.name === 'circles' ? 3.4 : 3.2));
+      const groupOpacity = group.opacity ?? (sphereProjection && group.name === 'circles' ? 0.42 : 1.0);
       const lines = createSegmentLines(geometry, group.color ?? '#2c3e50', {
         wide: useWide,
         linewidth: wideWidth,
         depthTest: !is2D,
-        transparent: sphereProjection && group.name === 'circles',
-        opacity: sphereProjection && group.name === 'circles' ? 0.42 : 1.0,
+        transparent: groupOpacity < 0.999,
+        opacity: groupOpacity,
       });
       if (is2D) {
         lines.renderOrder = group.name === 'exploration' ? 20 : 10;
@@ -1024,8 +1114,7 @@
       if (sphereProjection && group.name === 'circles' && sphereCircleOverlay) {
         sphereCircleOverlay.add(lines);
       } else {
-        scene.add(lines);
-        addLegendToggle(group.name, lines, group.color ?? '#2c3e50', group.default_visible ?? true);
+        addGroupedLegendToggle(group.legend_name ?? group.name, lines, group.color ?? '#2c3e50', group.default_visible ?? true);
       }
     }
 
