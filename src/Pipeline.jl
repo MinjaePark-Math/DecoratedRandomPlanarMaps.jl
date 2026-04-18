@@ -65,6 +65,8 @@ function _canonical_model_type(model_type)
         return "fk"
     elseif raw in ("spanning_tree", "spanningtree", "tree", "tree_decorated_map")
         return "spanning_tree"
+    elseif raw in ("mated_crt", "matedcrt", "mated_crt_map", "mated")
+        return "mated_crt"
     elseif raw in ("half_plane_meandric", "half_plane_meandric_system", "halfplane_meandric", "halfplane_meandric_system")
         return "half_plane_meandric"
     elseif raw in ("uniform_meandric", "uniform_meandric_system", "meandric", "meandric_system")
@@ -72,7 +74,7 @@ function _canonical_model_type(model_type)
     elseif raw in ("uniform_meander", "meander")
         return "uniform_meander"
     else
-        valid = join(["uniform", "schnyder", "fk", "spanning_tree", "half_plane_meandric", "uniform_meandric", "uniform_meander"], ", ")
+        valid = join(["uniform", "schnyder", "fk", "spanning_tree", "mated_crt", "half_plane_meandric", "uniform_meandric", "uniform_meander"], ", ")
         throw(ArgumentError("unknown model type $(repr(model_type)); expected one of: $valid"))
     end
 end
@@ -97,6 +99,12 @@ function build_map_from_config(model_cfg)
         nothing
     end
 
+    vertices = if haskey(cfg, "vertices")
+        Int(cfg["vertices"])
+    else
+        faces
+    end
+
     pairs = if haskey(cfg, "pairs")
         Int(cfg["pairs"])
     elseif haskey(cfg, "order")
@@ -114,6 +122,23 @@ function build_map_from_config(model_cfg)
     elseif model_type == "spanning_tree"
         faces === nothing && throw(ArgumentError("model.faces is required"))
         return build_spanning_tree_map(; faces=faces, seed=seed)
+    elseif model_type == "mated_crt"
+        vertices === nothing && throw(ArgumentError("model.vertices or model.faces is required"))
+        return build_mated_crt_map(
+            ;
+            vertices=vertices,
+            topology=get(cfg, "topology", "disk"),
+            gamma=get(cfg, "gamma", nothing),
+            gamma_prime=get(cfg, "gamma_prime", nothing),
+            kappa=get(cfg, "kappa", nothing),
+            kappa_prime=get(cfg, "kappa_prime", nothing),
+            correlation=get(cfg, "correlation", nothing),
+            seed=seed,
+            refinement=Int(get(cfg, "refinement", 4)),
+            burnin_sweeps=Int(get(cfg, "burnin_sweeps", 64)),
+            gibbs_sweeps=Int(get(cfg, "gibbs_sweeps", 128)),
+            max_tries=Int(get(cfg, "max_tries", 12)),
+        )
     elseif model_type == "half_plane_meandric"
         pairs === nothing && throw(ArgumentError("model.pairs or model.order is required"))
         return build_half_plane_meandric_system(
@@ -182,7 +207,9 @@ end
 
 function _model_metadata_from_config(model_type::AbstractString, model_cfg)
     cfg = _as_string_dict(model_cfg)
-    size_param = if haskey(cfg, "faces")
+    size_param = if haskey(cfg, "vertices")
+        Int(cfg["vertices"])
+    elseif haskey(cfg, "faces")
         Int(cfg["faces"])
     elseif haskey(cfg, "pairs")
         Int(cfg["pairs"])
@@ -196,7 +223,26 @@ function _model_metadata_from_config(model_type::AbstractString, model_cfg)
         "faces" => size_param,
         "seed" => Int(get(cfg, "seed", 1)),
     )
-    size_param > 0 && (md["pairs"] = size_param)
+    if model_type in ("half_plane_meandric", "uniform_meandric", "uniform_meander")
+        size_param > 0 && (md["pairs"] = size_param)
+    end
+    if model_type == "mated_crt"
+        md["vertices"] = size_param
+        md["topology"] = lowercase(strip(string(get(cfg, "topology", "disk"))))
+        params = _resolve_mated_crt_parameters(
+            ;
+            gamma=get(cfg, "gamma", nothing),
+            gamma_prime=get(cfg, "gamma_prime", nothing),
+            kappa=get(cfg, "kappa", nothing),
+            kappa_prime=get(cfg, "kappa_prime", nothing),
+            correlation=get(cfg, "correlation", nothing),
+        )
+        md["gamma"] = params["gamma"]
+        md["gamma_prime"] = params["gamma_prime"]
+        md["kappa"] = params["kappa"]
+        md["kappa_prime"] = params["kappa_prime"]
+        md["correlation"] = params["correlation"]
+    end
     if model_type == "fk" || model_type == "spanning_tree"
         if haskey(cfg, "q") && get(cfg, "q", nothing) !== nothing
             md["q"] = float(cfg["q"])
@@ -373,6 +419,7 @@ function _augment_sphere_render_triangles(triangles, render_count::Integer, layo
     tri = sanitize_triangles(triangles; drop_degenerate=true, deduplicate=false)
     topo = get(layout_metadata, "packing_topology", nothing)
     topo == "sphere" || return tri
+    get(layout_metadata, "circle_packing_preserves_render_vertices", false) && return tri
 
     if haskey(layout_metadata, "circle_packing_removed_outer_vertex") && haskey(layout_metadata, "circle_packing_packing_to_render_vertices")
         outer_vertex = Int(get(layout_metadata, "circle_packing_removed_outer_vertex", 0))
@@ -438,6 +485,7 @@ end
 function _augment_sphere_circle_render(base_pos, edge_groups, sphere_circle_geometry, layout_metadata, map_data=nothing)
     topo = get(layout_metadata, "packing_topology", nothing)
     topo == "sphere" || return base_pos, edge_groups, sphere_circle_geometry
+    get(layout_metadata, "circle_packing_preserves_render_vertices", false) && return base_pos, edge_groups, sphere_circle_geometry
 
     sphere_radius = float(get(layout_metadata, "sphere_radius", 1.0))
 

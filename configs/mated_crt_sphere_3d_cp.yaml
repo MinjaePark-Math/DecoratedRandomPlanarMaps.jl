@@ -1,0 +1,16 @@
+model:
+  type: mated_crt
+  topology: sphere
+  vertices: 100
+  gamma: 1.41421356237
+  seed: 17
+
+layout:
+  dimension: 3
+  engine: circle_packing
+  maxiter: 1200
+
+output:
+  export_web: ./exports/mated_crt_sphere_3d_cp
+  show: true
+  timings_json: ./exports/mated_crt_sphere_3d_cp/timings.json

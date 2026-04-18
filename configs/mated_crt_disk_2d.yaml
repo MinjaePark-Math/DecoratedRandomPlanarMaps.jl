@@ -1,0 +1,17 @@
+model:
+  type: mated_crt
+  topology: disk
+  vertices: 2000
+  gamma: 1.41421356237
+  seed: 71
+
+layout:
+  dimension: 2
+  engine: tutte
+  solver: direct
+
+output:
+  export_web: ./exports/mated_crt_disk_2d
+  preview_svg: ./exports/mated_crt_disk_2d/preview.svg
+  show: true
+  timings_json: ./exports/mated_crt_disk_2d/timings.json

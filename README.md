@@ -48,11 +48,12 @@ If you use `DecoratedRandomPlanarMaps.jl` in your research or course materials, 
 
 ## Supported Models
 
-The package currently supports five families of decorated random planar maps:
+The package currently supports six families of decorated random planar maps:
 - `uniform` — uniform quadrangulations
 - `schnyder` — Schnyder-wood-decorated triangulations
 - `fk` — FK-decorated maps with parameter `q` (or `p` from the Hamburger-Cheeseburger bijection). For 2D layouts, the boundary is chosen from an `h_gasket` or `c_gasket`.
 - `spanning_tree` — the FK model in the special case where `p = 0`
+- `mated_crt` — mated-CRT triangulations sampled from a correlated quadrant Brownian bridge / excursion approximation. The parameters `gamma`, `gamma_prime`, `kappa`, and `kappa_prime` are coupled by `gamma_prime = 4 / gamma`, `kappa = gamma^2`, and `kappa_prime = 16 / gamma^2`; the Brownian correlation is `-cos(pi * gamma^2 / 4)`.
 - `meandric` — uniform meanders, uniform meandric systems, and half-plane meandric systems
 
 **Note on FK Sampling Limitations:**
@@ -64,7 +65,7 @@ Closed uniform meandric systems are sampled exactly from two independent uniform
 ## Supported Layout Engines
 
 - `tutte` — 2D harmonic embedding with fixed boundary vertices
-- `circle_packing` — 2D circle packing for supported disk-topology problems, plus 3D sphere-topology circle packing via inverse stereographic projection; FK / spanning-tree sphere maps remove one outer vertex before packing, while Schnyder removes the outer face (`normalize_scale` sets the sphere radius; `sphere_projection_scale` controls how large the packed disk appears on that sphere; after lifting, a barycenter-based Möbius normalization is applied automatically)
+- `circle_packing` — 2D circle packing for supported disk-topology problems, plus 3D sphere-topology circle packing via inverse stereographic projection; FK / spanning-tree sphere maps remove one outer vertex before packing, while Schnyder and mated-CRT keep all map vertices and instead remove one outer face from the packing problem (`normalize_scale` sets the sphere radius; `sphere_projection_scale` controls how large the packed disk appears on that sphere; after lifting, a barycenter-based Möbius normalization is applied automatically)
 - `sfdp` — 3D embedding via Graphviz `sfdp` when available, with a built-in force-layout fallback when Graphviz is not installed
 
 Supported model/layout combinations:
@@ -73,11 +74,11 @@ Supported model/layout combinations:
 - `schnyder`: `tutte` or `circle_packing` in 2D, `sfdp` or `circle_packing` in 3D
 - `fk`: `tutte` or `circle_packing` in 2D only with `hc_boundary_mode: h_gasket` or `c_gasket`; `sfdp` or `circle_packing` in 3D
 - `spanning_tree`: `sfdp` or `circle_packing` in 3D only
+- `mated_crt`: `tutte` or `circle_packing` in 2D for `topology: disk`; `tutte` or `circle_packing` in 2D and `sfdp` or `circle_packing` in 3D for `topology: sphere`
 - `meandric`: `tutte` in 2D for half-plane meandric systems; `sfdp` in 3D for closed uniform meandric systems and uniform meanders
 
 ## Future Implementations
 
-- `mated_crt` — Mated-CRT (continuum-random-tree) maps
 - `bipolar` — Bipolar-orientation-decorated maps
 - `loop` — Various loop-decorated maps, such as O(n) models
 - `supercritical` — supercritical LQG models

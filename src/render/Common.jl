@@ -258,6 +258,11 @@ function surface_triangles(map_data=nothing; faces=nothing, triangles=nothing, d
         return _empty_triangles()
     elseif map_data isa FKMap
         return sanitize_triangles(map_data.triangulation_faces; drop_degenerate=drop_degenerate, deduplicate=deduplicate)
+    elseif map_data isa MatedCRTMap
+        faces = map_data.topology == :disk && Int(map_data.outer_face_index) >= 0 ?
+            [map_data.faces[i] for i in eachindex(map_data.faces) if i != Int(map_data.outer_face_index) + 1] :
+            map_data.faces
+        return fan_triangulate_faces(faces; drop_degenerate=drop_degenerate, deduplicate=deduplicate)
     elseif map_data isa UniformMap || map_data isa SchnyderMap
         return fan_triangulate_faces(map_data.faces; drop_degenerate=drop_degenerate, deduplicate=deduplicate)
     elseif map_data isa UniformMeandricSystemMap
@@ -334,6 +339,8 @@ function model_parameter_pairs(map_data=nothing; metadata=nothing)
 
     faces_val = if _metadata_has(metadata, "faces")
         _metadata_lookup(metadata, "faces")
+    elseif _metadata_has(metadata, "vertices") && _metadata_lookup(metadata, "model", nothing) == "mated_crt"
+        nothing
     elseif map_data !== nothing
         try
             num_faces(map_data)
@@ -344,6 +351,11 @@ function model_parameter_pairs(map_data=nothing; metadata=nothing)
         nothing
     end
     faces_val === nothing || push!(pairs, "faces" => string(Int(faces_val)))
+
+    if _metadata_lookup(metadata, "model", nothing) == "mated_crt"
+        vertices_val = _metadata_lookup(metadata, "vertices", map_data isa MatedCRTMap ? num_vertices(map_data) : nothing)
+        vertices_val === nothing || push!(pairs, "vertices" => string(Int(vertices_val)))
+    end
 
     seed_val = _metadata_lookup(metadata, "seed", nothing)
     seed_val === nothing || push!(pairs, "seed" => string(Int(seed_val)))
@@ -365,6 +377,13 @@ function model_parameter_pairs(map_data=nothing; metadata=nothing)
         end
         bmode = _metadata_lookup(metadata, "boundary_mode", nothing)
         bmode === nothing || push!(pairs, "boundary" => string(bmode))
+    elseif map_data isa MatedCRTMap || (_metadata_lookup(metadata, "model", nothing) == "mated_crt")
+        gamma_val = _metadata_lookup(metadata, "gamma", map_data isa MatedCRTMap ? map_data.gamma : nothing)
+        topology_val = _metadata_lookup(metadata, "topology", map_data isa MatedCRTMap ? String(map_data.topology) : nothing)
+        corr_val = _metadata_lookup(metadata, "correlation", map_data isa MatedCRTMap ? map_data.brownian_correlation : nothing)
+        gamma_val === nothing || push!(pairs, "gamma" => _maybe_float_string(gamma_val; digits=5))
+        topology_val === nothing || push!(pairs, "topology" => string(topology_val))
+        corr_val === nothing || push!(pairs, "rho" => _maybe_float_string(corr_val; digits=5))
     end
 
     return pairs
@@ -379,6 +398,7 @@ end
 function model_display_name(map_data=nothing; metadata=nothing)
     default_model = map_data isa HalfPlaneMeandricSystemMap ? "half_plane_meandric" :
                     map_data isa UniformMeandricSystemMap ? _meandric_model_name(map_data) :
+                    map_data isa MatedCRTMap ? "mated_crt" :
                     map_data isa UniformMap ? "uniform" :
                     map_data isa SchnyderMap ? "schnyder" :
                     map_data isa FKMap ? "fk" : "map"
@@ -407,9 +427,11 @@ end
 
 function should_include_exploration(map_data=nothing; edge_groups=nothing, metadata=nothing)
     map_data isa FKMap && return true
+    map_data isa MatedCRTMap && return false
 
     model_name = _metadata_model_name(metadata)
     model_name in ("fk", "spanning_tree", "hc") && return true
+    model_name == "mated_crt" && return false
 
     if edge_groups !== nothing
         try
@@ -557,6 +579,32 @@ function grouped_edges(map_data=nothing; edge_groups=nothing, drop_loops::Bool=t
             out[name] = arr
         end
         _append_meandric_highlights!(out, map_data)
+        return _sanitize_edge_group_dict(out; drop_loops=drop_loops)
+    elseif map_data isa MatedCRTMap
+        temp = Dict{String,Vector{NTuple{2,Int32}}}()
+        for i in eachindex(map_data.edge_u)
+            u = map_data.edge_u[i]
+            v = map_data.edge_v[i]
+            if drop_loops && u == v
+                continue
+            end
+            push!(get!(temp, "generic", NTuple{2,Int32}[]), (u, v))
+            kind = map_data.edge_kind[i]
+            if kind == :upper
+                push!(get!(temp, "red", NTuple{2,Int32}[]), (u, v))
+            elseif kind == :lower
+                push!(get!(temp, "blue", NTuple{2,Int32}[]), (u, v))
+            end
+        end
+        out = Dict{String,Matrix{Int32}}()
+        for (name, pairs_raw) in temp
+            arr = Matrix{Int32}(undef, length(pairs_raw), 2)
+            for (i, (u, v)) in enumerate(pairs_raw)
+                arr[i, 1] = u
+                arr[i, 2] = v
+            end
+            out[name] = arr
+        end
         return _sanitize_edge_group_dict(out; drop_loops=drop_loops)
     elseif map_data isa SchnyderMap
         temp = Dict{String,Vector{NTuple{2,Int32}}}()

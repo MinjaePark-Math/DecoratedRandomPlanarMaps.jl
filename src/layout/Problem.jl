@@ -2225,6 +2225,216 @@ function _prepare_schnyder_problem(map_data::SchnyderMap; dimension::Int, bounda
     )
 end
 
+function _mated_crt_raw_edges(map_data::MatedCRTMap)
+    return sanitize_edge_array(hcat(map_data.edge_u, map_data.edge_v))
+end
+
+function _mated_crt_edge_groups(map_data::MatedCRTMap)
+    generic = _mated_crt_raw_edges(map_data)
+    upper_pairs = NTuple{2,Int32}[]
+    lower_pairs = NTuple{2,Int32}[]
+
+    for i in eachindex(map_data.edge_u)
+        u = map_data.edge_u[i]
+        v = map_data.edge_v[i]
+        if map_data.edge_kind[i] == :upper
+            push!(upper_pairs, (u, v))
+        elseif map_data.edge_kind[i] == :lower
+            push!(lower_pairs, (u, v))
+        end
+    end
+
+    out = Dict{String,Matrix{Int32}}("generic" => generic)
+    if !isempty(upper_pairs)
+        arr = Matrix{Int32}(undef, length(upper_pairs), 2)
+        for (i, (u, v)) in enumerate(upper_pairs)
+            arr[i, 1] = u
+            arr[i, 2] = v
+        end
+        out["red"] = arr
+    end
+    if !isempty(lower_pairs)
+        arr = Matrix{Int32}(undef, length(lower_pairs), 2)
+        for (i, (u, v)) in enumerate(lower_pairs)
+            arr[i, 1] = u
+            arr[i, 2] = v
+        end
+        out["blue"] = arr
+    end
+    return out
+end
+
+function _mated_crt_face_lists_and_edge_ids(map_data::MatedCRTMap; drop_outer::Bool=false)
+    outer = Int(map_data.outer_face_index)
+    faces = Vector{Vector{Int32}}()
+    edge_ids = Vector{Vector{Int32}}()
+    for i in eachindex(map_data.faces)
+        drop_outer && outer >= 0 && i == outer + 1 && continue
+        push!(faces, Int32.(map_data.faces[i]))
+        push!(edge_ids, Int32.(map_data.face_edge_ids[i]))
+    end
+    return faces, edge_ids
+end
+
+function _mated_crt_triangle_matrices(map_data::MatedCRTMap; drop_outer::Bool=false)
+    face_lists, edge_lists = _mated_crt_face_lists_and_edge_ids(map_data; drop_outer=drop_outer)
+    triangles = Vector{Vector{Int32}}()
+    triangle_edge_ids = Vector{Vector{Int32}}()
+    for (face, ids) in zip(face_lists, edge_lists)
+        length(face) == 3 || throw(ArgumentError("mated_crt internal faces must be triangles"))
+        push!(triangles, face)
+        push!(triangle_edge_ids, ids)
+    end
+
+    tri = Matrix{Int32}(undef, length(triangles), 3)
+    tri_ids = Matrix{Int32}(undef, length(triangle_edge_ids), 3)
+    for i in eachindex(triangles)
+        tri[i, :] .= triangles[i]
+        tri_ids[i, :] .= triangle_edge_ids[i]
+    end
+    return tri, tri_ids, face_lists
+end
+
+function _mated_crt_sphere_face_data(map_data::MatedCRTMap)
+    tri_faces, triangle_edge_ids, face_lists = _mated_crt_triangle_matrices(map_data; drop_outer=false)
+    choice = _first_simple_face(face_lists, 3)
+    choice === nothing && throw(ArgumentError("failed to find a simple mated_crt triangular face for sphere layouts"))
+    idx, boundary = choice
+    length(boundary) == 3 || throw(ArgumentError("failed to find a simple mated_crt outer triangle"))
+
+    keep = trues(length(face_lists))
+    keep[Int(idx) + 1] = false
+    return (
+        boundary=Int32.(boundary[1:3]),
+        faces=face_lists[keep],
+        triangles=_drop_triangle_row(tri_faces, idx),
+        triangle_edge_ids=_drop_triangle_row(triangle_edge_ids, idx),
+        metadata=Dict{String,Any}(
+            "circle_packing_outer_triangle_index" => idx,
+            "circle_packing_outer_boundary_vertices" => Int.(boundary[1:3]),
+        ),
+    )
+end
+
+function _mated_crt_metadata(map_data::MatedCRTMap, dimension::Int)
+    return Dict{String,Any}(
+        "model" => "mated_crt",
+        "dimension" => dimension,
+        "topology" => String(map_data.topology),
+        "vertices" => num_vertices(map_data),
+        "gamma" => map_data.gamma,
+        "gamma_prime" => map_data.gamma_prime,
+        "kappa" => map_data.kappa,
+        "kappa_prime" => map_data.kappa_prime,
+        "correlation" => map_data.brownian_correlation,
+        "refinement" => map_data.refinement,
+        "sampler" => map_data.sampler,
+    )
+end
+
+function _prepare_mated_crt_problem(
+    map_data::MatedCRTMap;
+    dimension::Int,
+    boundary_scale::Float64,
+    engine=nothing,
+)
+    topo = map_data.topology
+    layout_engine = lowercase(strip(string(something(engine, topo == :disk ? "tutte" : (dimension == 3 ? "circle_packing" : "tutte")))))
+    edges = _mated_crt_raw_edges(map_data)
+    edge_groups = _mated_crt_edge_groups(map_data)
+
+    if topo == :disk
+        dimension == 2 || throw(ArgumentError("disk-topology mated_crt maps currently support only `dimension: 2`"))
+        tri, tri_ids, face_lists = _mated_crt_triangle_matrices(map_data; drop_outer=true)
+        boundary = copy(map_data.boundary_vertices)
+        length(boundary) >= 3 || throw(ArgumentError("mated_crt disk topology needs at least three boundary vertices"))
+        metadata = _mated_crt_metadata(map_data, 2)
+        metadata["boundary_positions_mode"] = "harmonic_measure"
+        metadata["outer_face_removed"] = true
+        metadata["layout_num_edges"] = size(edges, 1)
+        metadata["layout_num_collapsed_edges"] = size(first(collapse_undirected_edges(edges; drop_loops=true)), 1)
+        return LayoutProblem(
+            num_vertices=num_vertices(map_data),
+            edges=edges,
+            edge_groups=edge_groups,
+            boundary_vertices=boundary,
+            boundary_positions=nothing,
+            faces=face_lists,
+            surface_triangles=tri,
+            surface_triangle_edge_ids=tri_ids,
+            packing_boundary_vertices=layout_engine == "circle_packing" ? boundary : nothing,
+            packing_faces=layout_engine == "circle_packing" ? face_lists : nothing,
+            packing_triangles=layout_engine == "circle_packing" ? tri : nothing,
+            packing_triangle_edge_ids=layout_engine == "circle_packing" ? tri_ids : nothing,
+            metadata=metadata,
+            render_map_data=map_data,
+        )
+    end
+
+    topo == :sphere || throw(ArgumentError("unsupported mated_crt topology $(repr(topo))"))
+    tri_all, tri_ids_all, face_lists_all = _mated_crt_triangle_matrices(map_data; drop_outer=false)
+    sphere_face = _mated_crt_sphere_face_data(map_data)
+
+    metadata = _mated_crt_metadata(map_data, dimension)
+    metadata["layout_num_edges"] = size(edges, 1)
+    metadata["layout_num_collapsed_edges"] = size(first(collapse_undirected_edges(edges; drop_loops=true)), 1)
+    merge!(metadata, sphere_face.metadata)
+    metadata["circle_packing_preserves_render_vertices"] = true
+
+    if dimension == 3
+        if layout_engine == "circle_packing"
+            metadata["circle_packing_topology"] = "sphere"
+            return LayoutProblem(
+                num_vertices=num_vertices(map_data),
+                edges=edges,
+                edge_groups=edge_groups,
+                faces=face_lists_all,
+                surface_triangles=tri_all,
+                surface_triangle_edge_ids=tri_ids_all,
+                packing_boundary_vertices=sphere_face.boundary,
+                packing_faces=sphere_face.faces,
+                packing_triangles=sphere_face.triangles,
+                packing_triangle_edge_ids=sphere_face.triangle_edge_ids,
+                metadata=metadata,
+                render_map_data=map_data,
+            )
+        end
+
+        layout_engine == "sfdp" || throw(ArgumentError("sphere-topology mated_crt maps support `layout.engine: sfdp` or `circle_packing` in 3D"))
+        return LayoutProblem(
+            num_vertices=num_vertices(map_data),
+            edges=edges,
+            edge_groups=edge_groups,
+            faces=face_lists_all,
+            surface_triangles=tri_all,
+            surface_triangle_edge_ids=tri_ids_all,
+            metadata=metadata,
+            render_map_data=map_data,
+        )
+    elseif dimension == 2
+        metadata["outer_face_removed"] = true
+        metadata["boundary_positions_mode"] = "explicit_triangle"
+        return LayoutProblem(
+            num_vertices=num_vertices(map_data),
+            edges=edges,
+            edge_groups=edge_groups,
+            boundary_vertices=sphere_face.boundary,
+            boundary_positions=equilateral_triangle(boundary_scale),
+            faces=sphere_face.faces,
+            surface_triangles=sphere_face.triangles,
+            surface_triangle_edge_ids=sphere_face.triangle_edge_ids,
+            packing_boundary_vertices=layout_engine == "circle_packing" ? sphere_face.boundary : nothing,
+            packing_faces=layout_engine == "circle_packing" ? sphere_face.faces : nothing,
+            packing_triangles=layout_engine == "circle_packing" ? sphere_face.triangles : nothing,
+            packing_triangle_edge_ids=layout_engine == "circle_packing" ? sphere_face.triangle_edge_ids : nothing,
+            metadata=metadata,
+            render_map_data=map_data,
+        )
+    end
+
+    throw(ArgumentError("dimension must be 2 or 3"))
+end
+
 function _prepare_uniform_problem(map_data::UniformMap; dimension::Int, boundary_scale::Float64, outer_face_index=nothing, engine=nothing)
     layout_engine = lowercase(strip(string(something(engine, dimension == 3 ? "sfdp" : "tutte"))))
 
@@ -2658,6 +2868,13 @@ function prepare_layout_problem(map_data; dimension::Integer, boundary_scale=not
             hc_boundary_mode=get(opts, "hc_boundary_mode", nothing),
             engine=get(opts, "engine", nothing),
             outer_vertex=get(opts, "outer_vertex", nothing),
+        )
+    elseif map_data isa MatedCRTMap
+        return _prepare_mated_crt_problem(
+            map_data;
+            dimension=dim,
+            boundary_scale=scale,
+            engine=get(opts, "engine", nothing),
         )
     elseif map_data isa UniformMap
         return _prepare_uniform_problem(

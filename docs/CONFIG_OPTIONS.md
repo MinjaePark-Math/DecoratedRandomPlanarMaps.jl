@@ -12,12 +12,13 @@
 
 Common keys:
 
-- `type`: `uniform`, `schnyder`, `fk`, `spanning_tree`, `half_plane_meandric`, `uniform_meandric`, `uniform_meander`
+- `type`: `uniform`, `schnyder`, `fk`, `spanning_tree`, `mated_crt`, `half_plane_meandric`, `uniform_meandric`, `uniform_meander`
 - `seed`: RNG seed
 
 Size keys:
 
 - `faces`: number of faces for `uniform`, `schnyder`, `fk`, `spanning_tree`
+- `vertices`: number of vertices for `mated_crt` (if omitted, `faces` is also accepted as an alias)
 - `pairs` or `order`: meandric size parameter for `half_plane_meandric`, `uniform_meandric`, `uniform_meander`
 
 Meandric-only keys:
@@ -39,6 +40,19 @@ FK-only keys:
 - `exact_pilot_samples`: short pilot sample count used by `sampling_method: auto`
 - `exact_min_acceptance`: minimum estimated acceptance rate required before `auto` chooses exact rejection
 - `max_exact_tries`: safety cap for `exact_rejection`
+
+Mated-CRT-only keys:
+
+- `topology`: `disk` or `sphere`
+- `gamma`: LQG parameter in `(0, 2)`
+- `gamma_prime`: dual LQG parameter `4 / gamma`
+- `kappa`: SLE boundary parameter `gamma^2`
+- `kappa_prime`: space-filling SLE parameter `16 / gamma^2`
+- `correlation`: optional Brownian correlation; if provided directly it must agree with `-cos(pi * gamma^2 / 4)`
+- `refinement`: refined Brownian-bridge steps per output vertex interval; defaults to `4`
+- `burnin_sweeps`: Gibbs burn-in sweeps for the positive bridge sampler
+- `gibbs_sweeps`: Gibbs sampling sweeps after burn-in
+- `max_tries`: retry count used when the approximate bridge sample fails the planar triangulation checks
 
 ## `layout`
 
@@ -79,8 +93,9 @@ Common keys:
 
 3D circle-packing notes:
 
-- `circle_packing` in `dimension: 3` currently supports sphere-topology layouts for `schnyder`, `fk`, and `spanning_tree`
+- `circle_packing` in `dimension: 3` currently supports sphere-topology layouts for `schnyder`, `fk`, `spanning_tree`, and `mated_crt`
 - for FK sphere maps it removes one chosen outer vertex, packs the remaining disk triangulation, and then reinserts that vertex at the north pole for rendering
+- for mated-CRT sphere maps it removes one triangular face for packing and renders an auxiliary outer spherical vertex connected to that boundary
 - for Schnyder it removes the outer triangle for packing and renders an auxiliary outer spherical vertex connected to that boundary
 - `normalize_scale` sets the sphere radius for the lifted 3D embedding
 - `sphere_projection_scale` changes how large the packed disk appears on that sphere without changing the sphere radius itself
@@ -92,6 +107,7 @@ Supported layout combinations:
 - `schnyder`: `tutte` or `circle_packing` in 2D, `sfdp` or `circle_packing` in 3D
 - `fk`: `tutte` or `circle_packing` in 2D only with `hc_boundary_mode: h_gasket` or `c_gasket`; `sfdp` or `circle_packing` in 3D
 - `spanning_tree`: `sfdp` or `circle_packing` in 3D only
+- `mated_crt`: `tutte` or `circle_packing` in 2D for `topology: disk`; `tutte` or `circle_packing` in 2D and `sfdp` or `circle_packing` in 3D for `topology: sphere`
 - `half_plane_meandric`: `tutte` in 2D only; the boundary is placed by harmonic measure
 - `uniform_meandric`: `sfdp` in 3D only, using the glued-tree auxiliary graph for layout
 - `uniform_meander`: `sfdp` in 3D only, after tempered MCMC finds a single-loop meander

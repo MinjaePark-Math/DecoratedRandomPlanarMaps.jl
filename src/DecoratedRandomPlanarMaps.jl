@@ -18,6 +18,7 @@ include("core/Timing.jl")
 include("models/Uniform.jl")
 include("models/Schnyder.jl")
 include("models/FK.jl")
+include("models/MatedCRT.jl")
 include("models/Meandric.jl")
 
 include("render/Common.jl")
@@ -43,6 +44,7 @@ export FKMap, FKDecoratedMap, HCMap, SpanningTreeMap, build_fk_map, generate_fk_
 export build_hc_map, build_hc_map_from_word, sample_fk_word, sample_hc_word,
     sample_fk_word_exact_rejection, sample_hc_word_exact_rejection,
     estimate_fk_exact_rejection_acceptance, recommended_fk_approx_sampler_params
+export MatedCRTMap, MatedCRTPlanarMap, build_mated_crt_map, generate_mated_crt_map
 export HalfPlaneMeandricSystemMap, HalfPlaneMeandricMap,
     UniformMeandricSystemMap, UniformMeandricMap, UniformMeanderMap,
     build_half_plane_meandric_system, generate_half_plane_meandric_system,
