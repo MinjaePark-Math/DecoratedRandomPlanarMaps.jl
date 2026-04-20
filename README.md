@@ -36,7 +36,7 @@ If you use `DecoratedRandomPlanarMaps.jl` in your research or course materials, 
 > Park, M. (2026). *DecoratedRandomPlanarMaps.jl: A Julia package for sampling and rendering decorated random planar maps* [Computer software]. Zenodo. [https://doi.org/10.5281/zenodo.19582541](https://doi.org/10.5281/zenodo.19582541)
 
 ```bibtex
-@misc{Park_DecoratedRandomPlanarMaps_2026,
+@misc{Park2026DecoratedRandomPlanarMaps,
   author = {Park, Minjae},
   title = {DecoratedRandomPlanarMaps.jl: A Julia package for sampling and rendering decorated random planar maps},
   year = {2026},

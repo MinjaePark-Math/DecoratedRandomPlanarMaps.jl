@@ -170,6 +170,23 @@ end
     @test all(isfinite, pos3)
 end
 
+@testset "Uniform 3D SFDP preserves edge multiplicity" begin
+    m = generate_uniform_map(; faces=20, seed=1)
+    raw_edges = DecoratedRandomPlanarMaps.edge_pairs(m; collapse=false, drop_loops=true)
+    collapsed_edges = DecoratedRandomPlanarMaps.edge_pairs(m; collapse=true, drop_loops=true)
+    problem = prepare_layout_problem(m; dimension=3)
+
+    @test size(raw_edges, 1) > size(collapsed_edges, 1)
+    @test problem.edges == raw_edges
+    @test problem.edge_groups["generic"] == raw_edges
+    @test problem.metadata["layout_num_edges"] == size(raw_edges, 1)
+    @test problem.metadata["layout_num_collapsed_edges"] == size(collapsed_edges, 1)
+
+    pos3 = compute_sfdp_layout(problem.num_vertices, problem.edges; seed=5, iterations=30, scale=1.0)
+    @test size(pos3) == (problem.num_vertices, 3)
+    @test all(isfinite, pos3)
+end
+
 @testset "Unsupported layout combinations are rejected explicitly" begin
     st = build_spanning_tree_map(; faces=20, seed=2)
     uniform = generate_uniform_map(; faces=20, seed=2)

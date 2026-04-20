@@ -65,7 +65,7 @@ function _compute_force_layout_3d(
     pos .= randn(rng, n, 3)
     _normalize_pointcloud!(pos, 1.0)
 
-    edge_array, edge_weights = collapse_undirected_edges(edges; drop_loops=true)
+    edge_array = sanitize_edge_array(edges)
     k = K === nothing ? 1.0 / cbrt(max(n, 1)) : float(K)
     k > 0 || throw(ArgumentError("K must be positive"))
     repulse = float(repulsiveforce)
@@ -89,9 +89,10 @@ function _compute_force_layout_3d(
         for r in 1:size(edge_array, 1)
             u = Int(edge_array[r, 1]) + 1
             v = Int(edge_array[r, 2]) + 1
+            u == v && continue
             δ = pos[u, :] .- pos[v, :]
             dist = max(norm(δ), 1.0e-6)
-            force = edge_weights[r] * dist^2 / k
+            force = dist^2 / k
             vecf = (δ ./ dist) .* force
             disp[u, :] .-= vecf
             disp[v, :] .+= vecf

@@ -21,6 +21,7 @@ struct MatedCRTMap <: AbstractRandomPlanarMap
     edge_u::Vector{Int32}
     edge_v::Vector{Int32}
     edge_kind::Vector{Symbol}
+    sphere_layout_map::Union{Nothing,FKMap}
 end
 
 const MatedCRTPlanarMap = MatedCRTMap
@@ -196,6 +197,692 @@ function _sample_positive_bridge_path(
     path[end, 1] = endpoint[1]
     path[end, 2] = endpoint[2]
     return path
+end
+
+function _mated_crt_sphere_sampler(x)
+    raw = lowercase(strip(string(x)))
+    raw = replace(raw, '-' => '_')
+    if raw in ("exact", "cone_walk_exact", "exact_cone_walk")
+        return :exact
+    elseif raw in ("approx", "approximate", "hybrid", "approx_hybrid", "hybrid_cone_walk")
+        return :approx
+    end
+    throw(ArgumentError("mated_crt sphere sampler must be `exact` or `approx`"))
+end
+
+function _mated_crt_sample_weighted_index(weights::AbstractVector{<:Real}, rng::AbstractRNG)
+    total = 0.0
+    for weight in weights
+        total += max(float(weight), 0.0)
+    end
+    total > 0.0 || throw(ArgumentError("weighted sampling requires a positive total weight"))
+
+    threshold = rand(rng) * total
+    partial = 0.0
+    for (idx, weight) in enumerate(weights)
+        partial += max(float(weight), 0.0)
+        if threshold <= partial
+            return idx
+        end
+    end
+    return length(weights)
+end
+
+function _mated_crt_logsumexp(values::AbstractVector{<:Real})
+    isempty(values) && return -Inf
+    m = maximum(float.(values))
+    isfinite(m) || return m
+    total = 0.0
+    for value in values
+        total += exp(float(value) - m)
+    end
+    return m + log(total)
+end
+
+function _mated_crt_lazy_correlated_steps(correlation::Real)
+    rho = float(correlation)
+    abs(rho) < 1.0 || throw(ArgumentError("exact cone-walk sphere sampler requires correlation in (-1, 1)"))
+
+    q = abs(rho) / (2.0 - abs(rho))
+    cardinal_weight = (1.0 - q) / 4.0
+    diagonal_weight = q / 2.0
+
+    steps = NamedTuple{(:dx, :dy, :prod, :cost, :weight, :logw),Tuple{Int,Int,Int,Int,Float64,Float64}}[]
+
+    if cardinal_weight > 0.0
+        for (dx, dy) in ((1, 0), (-1, 0), (0, 1), (0, -1))
+            prod = max(dx, 0) + max(dy, 0)
+            push!(steps, (
+                dx=dx,
+                dy=dy,
+                prod=prod,
+                cost=abs(dx) + abs(dy),
+                weight=cardinal_weight,
+                logw=log(cardinal_weight),
+            ))
+        end
+    end
+
+    if diagonal_weight > 0.0
+        diagonals = rho > 0.0 ? ((1, 1), (-1, -1)) : ((1, -1), (-1, 1))
+        for (dx, dy) in diagonals
+            prod = max(dx, 0) + max(dy, 0)
+            push!(steps, (
+                dx=dx,
+                dy=dy,
+                prod=prod,
+                cost=abs(dx) + abs(dy),
+                weight=diagonal_weight,
+                logw=log(diagonal_weight),
+            ))
+        end
+    end
+
+    isempty(steps) && throw(ArgumentError("exact cone-walk sphere sampler needs at least one admissible step"))
+    return steps
+end
+
+function _mated_crt_exact_cone_logweight!(
+    cache::Dict{NTuple{3,Int},Float64},
+    steps,
+    remaining_productions::Integer,
+    x::Integer,
+    y::Integer,
+)
+    p = Int(remaining_productions)
+    xx = Int(x)
+    yy = Int(y)
+    xx >= 0 || return -Inf
+    yy >= 0 || return -Inf
+    p >= 0 || return -Inf
+
+    key = (p, xx, yy)
+    if haskey(cache, key)
+        return cache[key]
+    end
+
+    if p == 0 && xx == 0 && yy == 0
+        cache[key] = 0.0
+        return 0.0
+    end
+
+    log_terms = Float64[]
+    for step in steps
+        p_next = p - step.prod
+        p_next < 0 && continue
+
+        x_next = xx + step.dx
+        y_next = yy + step.dy
+        if x_next < 0 || y_next < 0
+            continue
+        end
+        if x_next == 0 && y_next == 0 && p_next != 0
+            continue
+        end
+
+        child = _mated_crt_exact_cone_logweight!(cache, steps, p_next, x_next, y_next)
+        isfinite(child) || continue
+        push!(log_terms, step.logw + child)
+    end
+
+    value = isempty(log_terms) ? -Inf : _mated_crt_logsumexp(log_terms)
+    cache[key] = value
+    return value
+end
+
+function _mated_crt_sample_exact_cone_step!(
+    cache::Dict{NTuple{3,Int},Float64},
+    steps,
+    remaining_productions::Integer,
+    x::Integer,
+    y::Integer,
+    rng::AbstractRNG,
+)
+    p = Int(remaining_productions)
+    xx = Int(x)
+    yy = Int(y)
+
+    step_ids = Int[]
+    log_weights = Float64[]
+    next_states = NTuple{3,Int}[]
+
+    for (idx, step) in enumerate(steps)
+        p_next = p - step.prod
+        p_next < 0 && continue
+
+        x_next = xx + step.dx
+        y_next = yy + step.dy
+        if x_next < 0 || y_next < 0
+            continue
+        end
+        if x_next == 0 && y_next == 0 && p_next != 0
+            continue
+        end
+
+        child = _mated_crt_exact_cone_logweight!(cache, steps, p_next, x_next, y_next)
+        isfinite(child) || continue
+
+        push!(step_ids, idx)
+        push!(log_weights, step.logw + child)
+        push!(next_states, (p_next, x_next, y_next))
+    end
+
+    isempty(step_ids) && throw(ArgumentError("failed to continue the exact cone-walk sphere excursion"))
+
+    max_log = maximum(log_weights)
+    weights = Float64[exp(logw - max_log) for logw in log_weights]
+    chosen = _mated_crt_sample_weighted_index(weights, rng)
+    return steps[step_ids[chosen]], next_states[chosen]
+end
+
+function _mated_crt_append_exact_suffix!(
+    word::Vector{UInt8},
+    cache::Dict{NTuple{3,Int},Float64},
+    steps,
+    remaining_productions::Integer,
+    x::Integer,
+    y::Integer,
+    rng::AbstractRNG,
+)
+    p = Int(remaining_productions)
+    xx = Int(x)
+    yy = Int(y)
+    while !(p == 0 && xx == 0 && yy == 0)
+        step, (p_next, x_next, y_next) = _mated_crt_sample_exact_cone_step!(cache, steps, p, xx, yy, rng)
+        _mated_crt_append_exact_step_block!(word, xx, yy, step.dx, step.dy, rng)
+        p = p_next
+        xx = x_next
+        yy = y_next
+    end
+    return word
+end
+
+function _mated_crt_append_exact_step_block!(
+    word::Vector{UInt8},
+    x::Integer,
+    y::Integer,
+    dx::Integer,
+    dy::Integer,
+    rng::AbstractRNG,
+)
+    xx = Int(x)
+    yy = Int(y)
+
+    if dx == 1 && dy == 0
+        push!(word, UInt8('h'))
+        return
+    elseif dx == -1 && dy == 0
+        push!(word, UInt8('H'))
+        return
+    elseif dx == 0 && dy == 1
+        push!(word, UInt8('c'))
+        return
+    elseif dx == 0 && dy == -1
+        push!(word, UInt8('C'))
+        return
+    elseif dx == 1 && dy == 1
+        if rand(rng, Bool)
+            push!(word, UInt8('h'))
+            push!(word, UInt8('c'))
+        else
+            push!(word, UInt8('c'))
+            push!(word, UInt8('h'))
+        end
+        return
+    elseif dx == -1 && dy == -1
+        if rand(rng, Bool)
+            push!(word, UInt8('H'))
+            push!(word, UInt8('C'))
+        else
+            push!(word, UInt8('C'))
+            push!(word, UInt8('H'))
+        end
+        return
+    elseif dx == 1 && dy == -1
+        choose_reverse = !(xx == 0 && yy == 1) && rand(rng, Bool)
+        if choose_reverse
+            push!(word, UInt8('C'))
+            push!(word, UInt8('h'))
+        else
+            push!(word, UInt8('h'))
+            push!(word, UInt8('C'))
+        end
+        return
+    elseif dx == -1 && dy == 1
+        choose_reverse = !(xx == 1 && yy == 0) && rand(rng, Bool)
+        if choose_reverse
+            push!(word, UInt8('H'))
+            push!(word, UInt8('c'))
+        else
+            push!(word, UInt8('c'))
+            push!(word, UInt8('H'))
+        end
+        return
+    end
+
+    throw(ArgumentError("unsupported exact cone-walk step ($dx, $dy)"))
+end
+
+function _mated_crt_exact_word_coordinates(word::AbstractString)
+    chars = codeunits(word)
+    L = Vector{Float64}(undef, length(chars) + 1)
+    R = Vector{Float64}(undef, length(chars) + 1)
+    x = 0
+    y = 0
+    L[1] = 0.0
+    R[1] = 0.0
+
+    for (idx, raw) in enumerate(chars)
+        ch = Char(raw)
+        if ch == 'h'
+            x += 1
+        elseif ch == 'H'
+            x -= 1
+        elseif ch == 'c'
+            y += 1
+        elseif ch == 'C'
+            y -= 1
+        else
+            throw(ArgumentError("invalid exact cone-walk letter $(repr(ch))"))
+        end
+        x >= 0 || throw(ArgumentError("exact cone-walk word left the quadrant in the first coordinate"))
+        y >= 0 || throw(ArgumentError("exact cone-walk word left the quadrant in the second coordinate"))
+        L[idx + 1] = float(x)
+        R[idx + 1] = float(y)
+    end
+
+    x == 0 || throw(ArgumentError("exact cone-walk word does not return to zero in the first coordinate"))
+    y == 0 || throw(ArgumentError("exact cone-walk word does not return to zero in the second coordinate"))
+    return L, R
+end
+
+function _mated_crt_sample_exact_sphere_word(
+    target_productions::Integer,
+    correlation::Real,
+    rng::AbstractRNG,
+)
+    target = Int(target_productions)
+    target >= 1 || throw(ArgumentError("exact cone-walk sphere sampler needs at least one production"))
+
+    rho = float(correlation)
+    if abs(rho) <= 1.0e-12
+        return sample_uniform_excursion_word(QuadrantBridgeSampler(target), rng)
+    end
+
+    steps = _mated_crt_lazy_correlated_steps(rho)
+    cache = Dict{NTuple{3,Int},Float64}()
+    root = _mated_crt_exact_cone_logweight!(cache, steps, target, 0, 0)
+    isfinite(root) || throw(ArgumentError("failed to sample an exact correlated cone excursion"))
+
+    word = UInt8[]
+    sizehint!(word, 2 * target)
+    _mated_crt_append_exact_suffix!(word, cache, steps, target, 0, 0, rng)
+    length(word) == 2 * target || throw(ArgumentError("exact cone-walk sphere word has the wrong length"))
+    return String(Char.(word))
+end
+
+_mated_crt_remaining_letters(p::Integer, x::Integer, y::Integer) = 2 * Int(p) + Int(x) + Int(y)
+
+function _mated_crt_cone_model(steps; harmonic_shift::NTuple{2,Float64}=(1.0, 1.0))
+    cov = zeros(Float64, 2, 2)
+    mean_cost = 0.0
+    total_weight = 0.0
+    for step in steps
+        total_weight += step.weight
+        mean_cost += step.weight * step.cost
+        cov[1, 1] += step.weight * step.dx * step.dx
+        cov[1, 2] += step.weight * step.dx * step.dy
+        cov[2, 1] += step.weight * step.dy * step.dx
+        cov[2, 2] += step.weight * step.dy * step.dy
+    end
+    total_weight > 0.0 || throw(ArgumentError("approximate cone model requires positive step weight"))
+    mean_cost > 0.0 || throw(ArgumentError("approximate cone model requires positive mean step cost"))
+    cov ./= total_weight
+    mean_cost /= total_weight
+
+    eig = eigen(Symmetric(cov))
+    minimum(eig.values) > 0.0 || throw(ArgumentError("approximate cone model requires positive-definite covariance"))
+    inv_sqrt_cov = eig.vectors * Diagonal(1.0 ./ sqrt.(eig.values)) * eig.vectors'
+    inv_cov = eig.vectors * Diagonal(1.0 ./ eig.values) * eig.vectors'
+
+    ray_x = inv_sqrt_cov * [1.0, 0.0]
+    ray_y = inv_sqrt_cov * [0.0, 1.0]
+    cross_xy = ray_x[1] * ray_y[2] - ray_x[2] * ray_y[1]
+    dot_xy = dot(ray_x, ray_y)
+    α = atan(abs(cross_xy), dot_xy)
+    0.0 < α < π || throw(ArgumentError("failed to construct a valid cone angle for the approximate sphere sampler"))
+    ν = π / α
+
+    return (
+        cov=cov,
+        inv_cov=inv_cov,
+        inv_sqrt_cov=inv_sqrt_cov,
+        ray_x=ray_x,
+        α=α,
+        ν=ν,
+        mean_cost=mean_cost,
+        harmonic_shift=harmonic_shift,
+    )
+end
+
+function _mated_crt_approx_logharmonic(model, x::Integer, y::Integer)
+    shift = model.harmonic_shift
+    shifted = model.inv_sqrt_cov * [Int(x) + shift[1], Int(y) + shift[2]]
+    r = hypot(shifted[1], shifted[2])
+    r > 0.0 || return -Inf
+
+    ray = model.ray_x
+    cross_ru = ray[1] * shifted[2] - ray[2] * shifted[1]
+    dot_ru = dot(ray, shifted)
+    θ = atan(max(cross_ru, 0.0), dot_ru)
+    θ = clamp(θ, 1.0e-12, model.α - 1.0e-12)
+    sin_term = sin(model.ν * θ)
+    sin_term > 0.0 || return -Inf
+    return model.ν * log(r) + log(sin_term)
+end
+
+function _mated_crt_approx_cone_logscore(
+    exact_cache::Dict{NTuple{3,Int},Float64},
+    steps,
+    model,
+    remaining_productions::Integer,
+    x::Integer,
+    y::Integer,
+    exact_tail_cutoff::Integer,
+)
+    p = Int(remaining_productions)
+    xx = Int(x)
+    yy = Int(y)
+    if p < 0 || xx < 0 || yy < 0
+        return -Inf
+    elseif p == 0 && xx == 0 && yy == 0
+        return 0.0
+    elseif xx == 0 && yy == 0
+        return -Inf
+    end
+
+    if p <= Int(exact_tail_cutoff)
+        return _mated_crt_exact_cone_logweight!(exact_cache, steps, p, xx, yy)
+    end
+
+    remaining_letters = _mated_crt_remaining_letters(p, xx, yy)
+    remaining_letters > 0 || return -Inf
+    effective_steps = remaining_letters / model.mean_cost
+    effective_steps > 0.0 || return -Inf
+
+    logharm = _mated_crt_approx_logharmonic(model, xx, yy)
+    isfinite(logharm) || return -Inf
+
+    z = [float(xx), float(yy)]
+    quad = dot(z, model.inv_cov * z)
+    return logharm - (model.ν + 1.0) * log(effective_steps) - quad / (2.0 * effective_steps)
+end
+
+function _mated_crt_sample_approx_cone_step!(
+    exact_cache::Dict{NTuple{3,Int},Float64},
+    steps,
+    model,
+    remaining_productions::Integer,
+    x::Integer,
+    y::Integer,
+    exact_tail_cutoff::Integer,
+    rng::AbstractRNG,
+)
+    p = Int(remaining_productions)
+    xx = Int(x)
+    yy = Int(y)
+
+    step_ids = Int[]
+    log_weights = Float64[]
+    next_states = NTuple{3,Int}[]
+
+    for (idx, step) in enumerate(steps)
+        p_next = p - step.prod
+        p_next < 0 && continue
+
+        x_next = xx + step.dx
+        y_next = yy + step.dy
+        if x_next < 0 || y_next < 0
+            continue
+        end
+        if x_next == 0 && y_next == 0 && p_next != 0
+            continue
+        end
+
+        child = _mated_crt_approx_cone_logscore(
+            exact_cache,
+            steps,
+            model,
+            p_next,
+            x_next,
+            y_next,
+            exact_tail_cutoff,
+        )
+        isfinite(child) || continue
+
+        push!(step_ids, idx)
+        push!(log_weights, step.logw + child)
+        push!(next_states, (p_next, x_next, y_next))
+    end
+
+    isempty(step_ids) && return nothing
+
+    max_log = maximum(log_weights)
+    weights = Float64[exp(logw - max_log) for logw in log_weights]
+    chosen = _mated_crt_sample_weighted_index(weights, rng)
+    return steps[step_ids[chosen]], next_states[chosen]
+end
+
+function _mated_crt_sample_approx_sphere_word(
+    target_productions::Integer,
+    correlation::Real,
+    rng::AbstractRNG;
+    exact_tail_cutoff::Integer=64,
+)
+    target = Int(target_productions)
+    target >= 1 || throw(ArgumentError("approximate sphere sampler needs at least one production"))
+    tail_cutoff = max(0, Int(exact_tail_cutoff))
+
+    rho = float(correlation)
+    if abs(rho) <= 1.0e-12
+        return sample_uniform_excursion_word(QuadrantBridgeSampler(target), rng)
+    end
+
+    steps = _mated_crt_lazy_correlated_steps(rho)
+    model = _mated_crt_cone_model(steps)
+    exact_cache = Dict{NTuple{3,Int},Float64}()
+
+    word = UInt8[]
+    sizehint!(word, 2 * target)
+    p = target
+    x = 0
+    y = 0
+
+    while !(p == 0 && x == 0 && y == 0)
+        if p <= tail_cutoff
+            _mated_crt_append_exact_suffix!(word, exact_cache, steps, p, x, y, rng)
+            p = 0
+            x = 0
+            y = 0
+            break
+        end
+
+        sampled = _mated_crt_sample_approx_cone_step!(
+            exact_cache,
+            steps,
+            model,
+            p,
+            x,
+            y,
+            tail_cutoff,
+            rng,
+        )
+
+        if sampled === nothing
+            _mated_crt_append_exact_suffix!(word, exact_cache, steps, p, x, y, rng)
+            p = 0
+            x = 0
+            y = 0
+            break
+        end
+
+        step, (p_next, x_next, y_next) = sampled
+        _mated_crt_append_exact_step_block!(word, x, y, step.dx, step.dy, rng)
+        p = p_next
+        x = x_next
+        y = y_next
+    end
+
+    length(word) == 2 * target || throw(ArgumentError("approximate sphere word has the wrong length"))
+    return String(Char.(word))
+end
+
+function _mated_crt_edge_kind_from_fk_color(color::Integer)
+    if Int(color) == Int(RED)
+        return :upper
+    elseif Int(color) == Int(BLUE)
+        return :lower
+    elseif Int(color) == Int(GREEN)
+        return :spine
+    end
+    return :generic
+end
+
+function _mated_crt_triangle_edge_ids_from_fk(map_data::FKMap)
+    tri_faces = Int32.(map_data.triangulation_faces)
+    tri_green = Int32.(map_data.triangle_green_edges)
+    tri_diag = Int32.(map_data.triangle_diag_edge)
+    nrows = size(tri_faces, 1)
+
+    size(tri_green, 1) == nrows || throw(ArgumentError("triangle_green_edges must align with triangulation_faces"))
+    length(tri_diag) == nrows || throw(ArgumentError("triangle_diag_edge must align with triangulation_faces"))
+
+    face_edge_ids = Vector{Vector{Int32}}(undef, nrows)
+    for i in 1:nrows
+        a = tri_faces[i, 1]
+        b = tri_faces[i, 2]
+        c = tri_faces[i, 3]
+        side_pairs = (
+            (min(a, b), max(a, b)),
+            (min(b, c), max(b, c)),
+            (min(c, a), max(c, a)),
+        )
+        triangle_edges = Int32[tri_green[i, 1], tri_green[i, 2], tri_diag[i]]
+        assigned = falses(3)
+        side_ids = fill(Int32(-1), 3)
+
+        for edge_id in triangle_edges
+            edge_id >= 0 || throw(ArgumentError("triangle edge ids must be nonnegative"))
+            pair = (
+                min(map_data.edge_u[Int(edge_id) + 1], map_data.edge_v[Int(edge_id) + 1]),
+                max(map_data.edge_u[Int(edge_id) + 1], map_data.edge_v[Int(edge_id) + 1]),
+            )
+
+            matched = 0
+            for j in 1:3
+                if !assigned[j] && side_pairs[j] == pair
+                    matched = j
+                    break
+                end
+            end
+            matched != 0 || throw(ArgumentError("failed to match a spanning-tree triangle edge to a triangle side"))
+            side_ids[matched] = edge_id
+            assigned[matched] = true
+        end
+
+        all(assigned) || throw(ArgumentError("incomplete spanning-tree triangle edge-id assignment"))
+        face_edge_ids[i] = side_ids
+    end
+
+    return face_edge_ids
+end
+
+function _build_mated_crt_sphere_map_from_word(
+    params::Dict{String,Float64},
+    word::AbstractString;
+    sampler::AbstractString="exact_correlated_cone_walk",
+)
+    st_map = build_fk_map_from_word(word; require_excursion=true)
+    faces = [Int32.(st_map.triangulation_faces[i, :]) for i in 1:size(st_map.triangulation_faces, 1)]
+    face_edge_ids = _mated_crt_triangle_edge_ids_from_fk(st_map)
+    edge_kind = [_mated_crt_edge_kind_from_fk_color(st_map.edge_color[i]) for i in eachindex(st_map.edge_color)]
+    L, R = _mated_crt_exact_word_coordinates(word)
+    time_grid = collect(range(0.0, 1.0; length=length(L)))
+
+    return MatedCRTMap(
+        :sphere,
+        num_vertices(st_map),
+        params["gamma"],
+        params["gamma_prime"],
+        params["kappa"],
+        params["kappa_prime"],
+        params["correlation"],
+        (0.0, 0.0),
+        1,
+        String(sampler),
+        time_grid,
+        L,
+        R,
+        faces,
+        face_edge_ids,
+        Int32[],
+        Int32(-1),
+        copy(st_map.edge_u),
+        copy(st_map.edge_v),
+        edge_kind,
+        st_map,
+    )
+end
+
+function _build_mated_crt_exact_sphere_map(
+    params::Dict{String,Float64},
+    target_vertices::Integer,
+    rng::AbstractRNG,
+)
+    n = Int(target_vertices)
+    n >= 3 || throw(ArgumentError("mated_crt sphere topology requires at least 3 vertices"))
+    target_productions = n - 2
+
+    sampler = if abs(params["correlation"]) <= 1.0e-12
+        "exact_spanning_tree_word"
+    else
+        "exact_lazy_correlated_cone_walk"
+    end
+    word = _mated_crt_sample_exact_sphere_word(target_productions, params["correlation"], rng)
+    return _build_mated_crt_sphere_map_from_word(
+        params,
+        word;
+        sampler=sampler * "+spanning_tree_word",
+    )
+end
+
+function _build_mated_crt_approx_sphere_map(
+    params::Dict{String,Float64},
+    target_vertices::Integer,
+    rng::AbstractRNG;
+    exact_tail_cutoff::Integer=64,
+)
+    n = Int(target_vertices)
+    n >= 3 || throw(ArgumentError("mated_crt sphere topology requires at least 3 vertices"))
+    target_productions = n - 2
+    tail_cutoff = max(0, Int(exact_tail_cutoff))
+
+    sampler = if abs(params["correlation"]) <= 1.0e-12
+        "approx_hybrid_zero_corr_exact_tail$(tail_cutoff)"
+    else
+        "approx_hybrid_cone_walk_tail$(tail_cutoff)"
+    end
+    word = _mated_crt_sample_approx_sphere_word(
+        target_productions,
+        params["correlation"],
+        rng;
+        exact_tail_cutoff=tail_cutoff,
+    )
+    return _build_mated_crt_sphere_map_from_word(
+        params,
+        word;
+        sampler=sampler * "+spanning_tree_word",
+    )
 end
 
 function _mated_crt_face_cycles(
@@ -737,6 +1424,7 @@ function _mated_crt_collapse_intervals(
     boundary_vertices::Vector{Int32},
     outer_face_index::Int32,
     faces::Vector{Vector{Int32}},
+    face_edge_ids::Vector{Vector{Int32}},
     edge_u::Vector{Int32},
     edge_v::Vector{Int32},
     edge_kind::Vector{Symbol},
@@ -1092,6 +1780,7 @@ function _build_mated_crt_map_from_paths(
         boundary_vertices,
         outer_face_index,
         faces,
+        face_edge_ids,
         edge_u,
         edge_v,
         edge_kind,
@@ -1121,6 +1810,7 @@ function _build_mated_crt_map_from_paths(
         quotient.edge_u,
         quotient.edge_v,
         quotient.edge_kind,
+        nothing,
     )
 end
 
@@ -1137,6 +1827,8 @@ function build_mated_crt_map(;
     burnin_sweeps::Integer=64,
     gibbs_sweeps::Integer=128,
     max_tries::Integer=12,
+    sphere_sampler::Union{Symbol,AbstractString}=:exact,
+    sphere_exact_tail_cutoff::Integer=64,
 )
     n = Int(vertices)
     n >= 3 || throw(ArgumentError("vertices must be >= 3"))
@@ -1153,7 +1845,21 @@ function build_mated_crt_map(;
         correlation=correlation,
     )
 
-    endpoint = topo == :disk ? (1.0, 0.0) : (0.0, 0.0)
+    if topo == :sphere
+        rng = MersenneTwister(Int(seed))
+        sphere_mode = _mated_crt_sphere_sampler(sphere_sampler)
+        if sphere_mode == :exact
+            return _build_mated_crt_exact_sphere_map(params, n, rng)
+        end
+        return _build_mated_crt_approx_sphere_map(
+            params,
+            n,
+            rng;
+            exact_tail_cutoff=sphere_exact_tail_cutoff,
+        )
+    end
+
+    endpoint = (1.0, 0.0)
     total_steps = n * r
 
     last_error = nothing

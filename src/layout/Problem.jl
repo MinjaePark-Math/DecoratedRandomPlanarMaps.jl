@@ -2229,6 +2229,169 @@ function _mated_crt_raw_edges(map_data::MatedCRTMap)
     return sanitize_edge_array(hcat(map_data.edge_u, map_data.edge_v))
 end
 
+function _mated_crt_reconstruct_keep_vertices(map_data::MatedCRTMap)
+    r = Int(map_data.refinement)
+    raw_n = fld(length(map_data.L) - 1, r)
+    raw_n >= num_vertices(map_data) ||
+        throw(ArgumentError("stored mated_crt path is inconsistent with the quotient vertex count"))
+
+    edge_u, edge_v, edge_kind = _build_mated_crt_edges(map_data.L, map_data.R, raw_n, r)
+    raw_faces, raw_face_edge_ids = _mated_crt_face_cycles(raw_n, edge_u, edge_v, edge_kind, Int32[])
+
+    faces = Vector{Vector{Int32}}()
+    face_edge_ids = Vector{Vector{Int32}}()
+    for (face, ids) in zip(raw_faces, raw_face_edge_ids)
+        split_faces, split_ids = _mated_crt_split_pinched_face_walk(face, ids)
+        append!(faces, split_faces)
+        append!(face_edge_ids, split_ids)
+    end
+
+    edge_u, edge_v, edge_kind, _, _ =
+        _collapse_mated_crt_parallel_edges(edge_u, edge_v, edge_kind, faces, face_edge_ids)
+
+    intervals = _mated_crt_outermost_intervals(map_data.topology, raw_n, edge_u, edge_v, edge_kind)
+    removed = falses(raw_n)
+    for (a, b) in intervals
+        for v in (Int(a) + 1):(Int(b) - 1)
+            removed[v + 1] = true
+        end
+    end
+
+    keep_vertices = Int32[v for v in 0:(raw_n - 1) if !removed[v + 1]]
+    length(keep_vertices) == num_vertices(map_data) ||
+        throw(ArgumentError("reconstructed mated_crt quotient vertices do not match the stored sphere map"))
+    return raw_n, keep_vertices
+end
+
+function _mated_crt_rotate_loop(values::Vector{Float64}, refinement::Integer, shift_vertices::Integer)
+    r = Int(refinement)
+    n = fld(length(values) - 1, r)
+    n >= 1 || throw(ArgumentError("mated_crt loop rotation needs at least one cell"))
+    total_steps = n * r
+    shift = mod(Int(shift_vertices), n)
+    shift == 0 && return copy(values)
+
+    out = similar(values)
+    for j in 0:total_steps
+        src = mod(j + shift * r, total_steps)
+        out[j + 1] = values[src + 1]
+    end
+    out .-= out[1]
+    return out
+end
+
+function _mated_crt_forward_mid_min_table(values::Vector{Float64}, refinement::Integer)
+    r = Int(refinement)
+    n = fld(length(values) - 1, r)
+    vertex_vals = Float64[values[p * r + 1] for p in 0:(n - 1)]
+    cell_min = Float64[minimum(@view values[p * r + 1:(p + 1) * r + 1]) for p in 0:(n - 1)]
+
+    table = fill(Inf, n, n)
+    for a in 0:(n - 1)
+        current = vertex_vals[a + 1]
+        table[a + 1, a + 1] = current
+        for step in 1:(n - 1)
+            if step >= 2
+                current = min(current, cell_min[mod(a + step - 1, n) + 1])
+            end
+            b = mod(a + step, n)
+            table[a + 1, b + 1] = current
+        end
+    end
+    return table, cell_min
+end
+
+function _mated_crt_choose_cyclic_cut(L::Vector{Float64}, R::Vector{Float64}, refinement::Integer)
+    r = Int(refinement)
+    n = fld(length(L) - 1, r)
+    n <= 1 && return 0
+
+    lower_mid, cell_min_L = _mated_crt_forward_mid_min_table(L, r)
+    upper_mid, cell_min_R = _mated_crt_forward_mid_min_table(R, r)
+    covered = falses(n)
+
+    for a in 0:(n - 1)
+        for step in 2:(n - 1)
+            b = mod(a + step, n)
+            lower_ok = max(cell_min_L[a + 1], cell_min_L[b + 1]) <= lower_mid[a + 1, b + 1] + 1.0e-10
+            upper_ok = max(cell_min_R[a + 1], cell_min_R[b + 1]) <= upper_mid[a + 1, b + 1] + 1.0e-10
+            if lower_ok && upper_ok
+                for k in 1:(step - 1)
+                    covered[mod(a + k, n) + 1] = true
+                end
+            end
+        end
+    end
+
+    for shift in 1:(n - 1)
+        !covered[shift + 1] && return shift
+    end
+    return 1
+end
+
+function _mated_crt_graph_only_quotient_edges(
+    L::Vector{Float64},
+    R::Vector{Float64},
+    refinement::Integer,
+)
+    r = Int(refinement)
+    raw_n = fld(length(L) - 1, r)
+    edge_u, edge_v, edge_kind = _build_mated_crt_edges(L, R, raw_n, r)
+    edge_u, edge_v, edge_kind, _, _ =
+        _collapse_mated_crt_parallel_edges(edge_u, edge_v, edge_kind, Vector{Vector{Int32}}(), Vector{Vector{Int32}}())
+
+    intervals = _mated_crt_outermost_intervals(:sphere, raw_n, edge_u, edge_v, edge_kind)
+    removed = falses(raw_n)
+    for (a, b) in intervals
+        for v in (Int(a) + 1):(Int(b) - 1)
+            removed[v + 1] = true
+        end
+    end
+
+    keep_vertices = Int32[v for v in 0:(raw_n - 1) if !removed[v + 1]]
+    old_to_new = Dict(Int(v) => i - 1 for (i, v) in enumerate(keep_vertices))
+
+    remapped = NTuple{2,Int32}[]
+    for i in eachindex(edge_u)
+        removed[Int(edge_u[i]) + 1] && continue
+        removed[Int(edge_v[i]) + 1] && continue
+        u = Int32(old_to_new[Int(edge_u[i])])
+        v = Int32(old_to_new[Int(edge_v[i])])
+        u == v && continue
+        push!(remapped, (u, v))
+    end
+
+    edge_array = Matrix{Int32}(undef, length(remapped), 2)
+    for (i, (u, v)) in enumerate(remapped)
+        edge_array[i, 1] = u
+        edge_array[i, 2] = v
+    end
+    return keep_vertices, first(collapse_undirected_edges(edge_array; drop_loops=true))
+end
+
+function _mated_crt_sphere_sfdp_edges(map_data::MatedCRTMap)
+    map_data.topology == :sphere ||
+        throw(ArgumentError("sphere-topology sfdp layout edges are defined only for sphere topology"))
+
+    raw_n, keep_old = _mated_crt_reconstruct_keep_vertices(map_data)
+    shift = _mated_crt_choose_cyclic_cut(map_data.L, map_data.R, map_data.refinement)
+    L_rot = _mated_crt_rotate_loop(map_data.L, map_data.refinement, shift)
+    R_rot = _mated_crt_rotate_loop(map_data.R, map_data.refinement, shift)
+    keep_rot, edges_rot = _mated_crt_graph_only_quotient_edges(L_rot, R_rot, map_data.refinement)
+
+    keep_raw = Int32[mod(Int(v) + shift, raw_n) for v in keep_rot]
+    sort(copy(keep_raw)) == sort(copy(keep_old)) ||
+        throw(ArgumentError("cyclic mated_crt sphere quotient changed the retained raw vertices"))
+
+    raw_to_old = Dict(Int(v) => Int32(i - 1) for (i, v) in enumerate(keep_old))
+    remapped = Matrix{Int32}(undef, size(edges_rot, 1), 2)
+    for i in 1:size(edges_rot, 1)
+        remapped[i, 1] = raw_to_old[Int(keep_raw[Int(edges_rot[i, 1]) + 1])]
+        remapped[i, 2] = raw_to_old[Int(keep_raw[Int(edges_rot[i, 2]) + 1])]
+    end
+    return sanitize_edge_array(remapped), shift
+end
+
 function _mated_crt_edge_groups(map_data::MatedCRTMap)
     generic = _mated_crt_raw_edges(map_data)
     upper_pairs = NTuple{2,Int32}[]
@@ -2317,7 +2480,7 @@ function _mated_crt_sphere_face_data(map_data::MatedCRTMap)
 end
 
 function _mated_crt_metadata(map_data::MatedCRTMap, dimension::Int)
-    return Dict{String,Any}(
+    metadata = Dict{String,Any}(
         "model" => "mated_crt",
         "dimension" => dimension,
         "topology" => String(map_data.topology),
@@ -2330,6 +2493,14 @@ function _mated_crt_metadata(map_data::MatedCRTMap, dimension::Int)
         "refinement" => map_data.refinement,
         "sampler" => map_data.sampler,
     )
+    if map_data.topology == :sphere && map_data.sphere_layout_map !== nothing
+        metadata["sphere_construction"] = occursin("approx", lowercase(map_data.sampler)) ?
+            "approx_hybrid_cone_walk_spanning_tree" :
+            "exact_cone_walk_spanning_tree"
+        metadata["linearized_word_length"] = length(map_data.sphere_layout_map.word)
+        metadata["linearized_num_productions"] = length(map_data.sphere_layout_map.production_steps)
+    end
+    return metadata
 end
 
 function _prepare_mated_crt_problem(
@@ -2372,12 +2543,102 @@ function _prepare_mated_crt_problem(
     end
 
     topo == :sphere || throw(ArgumentError("unsupported mated_crt topology $(repr(topo))"))
+    metadata = _mated_crt_metadata(map_data, dimension)
+    base_layout_edges = size(edges, 1)
+    base_collapsed_edges = size(first(collapse_undirected_edges(edges; drop_loops=true)), 1)
+    metadata["layout_num_edges"] = base_layout_edges
+    metadata["layout_num_collapsed_edges"] = base_collapsed_edges
+
+    if map_data.sphere_layout_map !== nothing
+        tri_all, tri_ids_all, face_lists_all = _mated_crt_triangle_matrices(map_data; drop_outer=false)
+        if dimension == 3
+            if layout_engine == "circle_packing"
+                try
+                    chosen = _sphere_circle_packing_hc_outer_vertex_candidate(map_data.sphere_layout_map, edge_groups)
+                    merge!(metadata, chosen.metadata)
+                    metadata["circle_packing_topology"] = "sphere"
+                    metadata["circle_packing_outer_vertex_selection"] = "first_valid"
+                    metadata["layout_graph_mode"] = "spanning_tree_raw"
+                    return LayoutProblem(
+                        num_vertices=chosen.packing_num_vertices,
+                        edges=chosen.packing_edges,
+                        edge_groups=chosen.packing_edge_groups,
+                        surface_triangles=chosen.packing_triangles,
+                        surface_triangle_edge_ids=chosen.packing_triangle_edge_ids,
+                        packing_boundary_vertices=chosen.packing_boundary_vertices,
+                        packing_triangles=chosen.packing_triangles,
+                        packing_triangle_edge_ids=chosen.packing_triangle_edge_ids,
+                        metadata=metadata,
+                        render_map_data=map_data,
+                    )
+                catch err
+                    if !(err isa ArgumentError)
+                        rethrow()
+                    end
+
+                    sphere_face = _mated_crt_sphere_face_data(map_data)
+                    merge!(metadata, sphere_face.metadata)
+                    metadata["circle_packing_topology"] = "sphere"
+                    metadata["circle_packing_outer_vertex_selection"] = "mated_crt_face_fallback"
+                    metadata["layout_graph_mode"] = "spanning_tree_raw"
+                    return LayoutProblem(
+                        num_vertices=num_vertices(map_data),
+                        edges=edges,
+                        edge_groups=edge_groups,
+                        faces=face_lists_all,
+                        surface_triangles=tri_all,
+                        surface_triangle_edge_ids=tri_ids_all,
+                        packing_boundary_vertices=sphere_face.boundary,
+                        packing_faces=sphere_face.faces,
+                        packing_triangles=sphere_face.triangles,
+                        packing_triangle_edge_ids=sphere_face.triangle_edge_ids,
+                        metadata=metadata,
+                        render_map_data=map_data,
+                    )
+                end
+            end
+
+            layout_engine == "sfdp" || throw(ArgumentError("sphere-topology mated_crt maps support `layout.engine: sfdp` or `circle_packing` in 3D"))
+            metadata["layout_graph_mode"] = "spanning_tree_raw"
+            return LayoutProblem(
+                num_vertices=num_vertices(map_data),
+                edges=edges,
+                edge_groups=edge_groups,
+                faces=face_lists_all,
+                surface_triangles=tri_all,
+                surface_triangle_edge_ids=tri_ids_all,
+                metadata=metadata,
+                render_map_data=map_data,
+            )
+        elseif dimension == 2
+            sphere_face = _mated_crt_sphere_face_data(map_data)
+            merge!(metadata, sphere_face.metadata)
+            metadata["outer_face_removed"] = true
+            metadata["boundary_positions_mode"] = "explicit_triangle"
+            return LayoutProblem(
+                num_vertices=num_vertices(map_data),
+                edges=edges,
+                edge_groups=edge_groups,
+                boundary_vertices=sphere_face.boundary,
+                boundary_positions=equilateral_triangle(boundary_scale),
+                faces=sphere_face.faces,
+                surface_triangles=sphere_face.triangles,
+                surface_triangle_edge_ids=sphere_face.triangle_edge_ids,
+                packing_boundary_vertices=layout_engine == "circle_packing" ? sphere_face.boundary : nothing,
+                packing_faces=layout_engine == "circle_packing" ? sphere_face.faces : nothing,
+                packing_triangles=layout_engine == "circle_packing" ? sphere_face.triangles : nothing,
+                packing_triangle_edge_ids=layout_engine == "circle_packing" ? sphere_face.triangle_edge_ids : nothing,
+                metadata=metadata,
+                render_map_data=map_data,
+            )
+        end
+
+        throw(ArgumentError("dimension must be 2 or 3"))
+    end
+
     tri_all, tri_ids_all, face_lists_all = _mated_crt_triangle_matrices(map_data; drop_outer=false)
     sphere_face = _mated_crt_sphere_face_data(map_data)
 
-    metadata = _mated_crt_metadata(map_data, dimension)
-    metadata["layout_num_edges"] = size(edges, 1)
-    metadata["layout_num_collapsed_edges"] = size(first(collapse_undirected_edges(edges; drop_loops=true)), 1)
     merge!(metadata, sphere_face.metadata)
     metadata["circle_packing_preserves_render_vertices"] = true
 
@@ -2401,9 +2662,16 @@ function _prepare_mated_crt_problem(
         end
 
         layout_engine == "sfdp" || throw(ArgumentError("sphere-topology mated_crt maps support `layout.engine: sfdp` or `circle_packing` in 3D"))
+        sfdp_edges, cut_shift = _mated_crt_sphere_sfdp_edges(map_data)
+        metadata["layout_graph_mode"] = "sphere_cyclic_quotient"
+        metadata["layout_num_base_edges"] = base_layout_edges
+        metadata["layout_num_base_collapsed_edges"] = base_collapsed_edges
+        metadata["layout_graph_cut_shift"] = cut_shift
+        metadata["layout_num_edges"] = size(sfdp_edges, 1)
+        metadata["layout_num_collapsed_edges"] = size(first(collapse_undirected_edges(sfdp_edges; drop_loops=true)), 1)
         return LayoutProblem(
             num_vertices=num_vertices(map_data),
-            edges=edges,
+            edges=sfdp_edges,
             edge_groups=edge_groups,
             faces=face_lists_all,
             surface_triangles=tri_all,
@@ -2447,14 +2715,17 @@ function _prepare_uniform_problem(map_data::UniformMap; dimension::Int, boundary
     faces = _faces_as_lists(map_data.faces)
 
     if dimension == 3
+        raw_edges = edge_pairs(map_data; collapse=false, drop_loops=true)
         return LayoutProblem(
             num_vertices=num_vertices(map_data),
-            edges=edges,
-            edge_groups=edge_groups,
+            edges=raw_edges,
+            edge_groups=Dict("generic" => raw_edges),
             faces=faces,
             metadata=Dict(
                 "model" => "uniform",
                 "dimension" => 3,
+                "layout_num_edges" => size(raw_edges, 1),
+                "layout_num_collapsed_edges" => size(first(collapse_undirected_edges(raw_edges; drop_loops=true)), 1),
             ),
             render_map_data=map_data,
         )

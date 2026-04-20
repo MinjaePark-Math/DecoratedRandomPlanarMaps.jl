@@ -138,6 +138,8 @@ function build_map_from_config(model_cfg)
             burnin_sweeps=Int(get(cfg, "burnin_sweeps", 64)),
             gibbs_sweeps=Int(get(cfg, "gibbs_sweeps", 128)),
             max_tries=Int(get(cfg, "max_tries", 12)),
+            sphere_sampler=get(cfg, "sphere_sampler", "exact"),
+            sphere_exact_tail_cutoff=Int(get(cfg, "sphere_exact_tail_cutoff", 64)),
         )
     elseif model_type == "half_plane_meandric"
         pairs === nothing && throw(ArgumentError("model.pairs or model.order is required"))
@@ -229,6 +231,10 @@ function _model_metadata_from_config(model_type::AbstractString, model_cfg)
     if model_type == "mated_crt"
         md["vertices"] = size_param
         md["topology"] = lowercase(strip(string(get(cfg, "topology", "disk"))))
+        md["sphere_sampler"] = lowercase(strip(string(get(cfg, "sphere_sampler", "exact"))))
+        if haskey(cfg, "sphere_exact_tail_cutoff")
+            md["sphere_exact_tail_cutoff"] = Int(cfg["sphere_exact_tail_cutoff"])
+        end
         params = _resolve_mated_crt_parameters(
             ;
             gamma=get(cfg, "gamma", nothing),
