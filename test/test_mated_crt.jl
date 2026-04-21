@@ -9,6 +9,16 @@ using DecoratedRandomPlanarMaps
     @test params["gamma_prime"] ≈ 2sqrt(2.0) atol=1.0e-12
     @test params["correlation"] ≈ 0.0 atol=1.0e-12
 
+    endpoint = DecoratedRandomPlanarMaps._resolve_mated_crt_parameters(; gamma=2.0)
+    @test endpoint["gamma"] ≈ 2.0 atol=1.0e-12
+    @test endpoint["kappa"] ≈ 4.0 atol=1.0e-12
+    @test endpoint["kappa_prime"] ≈ 4.0 atol=1.0e-12
+    @test endpoint["gamma_prime"] ≈ 2.0 atol=1.0e-12
+    @test endpoint["correlation"] ≈ 1.0 atol=1.0e-12
+
+    endpoint_from_prime = DecoratedRandomPlanarMaps._resolve_mated_crt_parameters(; gamma_prime=2.0, kappa_prime=4.0)
+    @test endpoint_from_prime["gamma"] ≈ 2.0 atol=1.0e-12
+
     cfg_map = build_map_from_config(Dict(
         "type" => "mated_crt",
         "vertices" => 12,
@@ -243,4 +253,38 @@ end
     @test R[end] == 0.0
     @test minimum(L) >= 0.0
     @test minimum(R) >= 0.0
+end
+
+@testset "Mated-CRT sphere supports the gamma equals two endpoint" begin
+    m = build_mated_crt_map(
+        ;
+        vertices=12,
+        topology="sphere",
+        gamma=2.0,
+        seed=9,
+        sphere_sampler=:approx,
+    )
+    problem = prepare_layout_problem(m; dimension=3, options=Dict("engine" => "sfdp"))
+
+    @test m.gamma ≈ 2.0 atol=1.0e-12
+    @test m.brownian_correlation ≈ 1.0 atol=1.0e-12
+    @test occursin("approx_perfect_corr_diagonal_excursion", m.sampler)
+    @test problem.metadata["sphere_construction"] == "approx_hybrid_cone_walk_spanning_tree"
+    @test problem.metadata["layout_graph_mode"] == "spanning_tree_raw"
+
+    word = m.sphere_layout_map.word
+    @test length(word) == 2 * (num_vertices(m) - 2)
+    for i in 1:2:length(word)
+        @test word[i:min(i + 1, end)] in ("hc", "ch", "HC", "CH")
+    end
+end
+
+@testset "Mated-CRT disk rejects the gamma equals two endpoint" begin
+    @test_throws ArgumentError build_mated_crt_map(
+        ;
+        vertices=12,
+        topology="disk",
+        gamma=2.0,
+        seed=1,
+    )
 end

@@ -44,7 +44,7 @@ FK-only keys:
 Mated-CRT-only keys:
 
 - `topology`: `disk` or `sphere`
-- `gamma`: LQG parameter in `(0, 2)`
+- `gamma`: LQG parameter in `(0, 2]`
 - `gamma_prime`: dual LQG parameter `4 / gamma`
 - `kappa`: SLE boundary parameter `gamma^2`
 - `kappa_prime`: space-filling SLE parameter `16 / gamma^2`

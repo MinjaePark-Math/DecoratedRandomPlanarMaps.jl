@@ -12,6 +12,7 @@ Swap in any of:
 - `examples/schnyder_examples.jl`
 - `examples/fk_examples.jl`
 - `examples/spanning_tree_examples.jl`
+- `examples/mated_crt_gamma_sweep.jl`
 - `examples/meandric.jl`
 - `examples/meandric_arc_diagrams.jl`
 

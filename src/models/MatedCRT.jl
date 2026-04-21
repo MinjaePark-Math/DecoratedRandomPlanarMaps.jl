@@ -62,25 +62,25 @@ function _resolve_mated_crt_parameters(;
 
     if gamma !== nothing
         γ = float(gamma)
-        0.0 < γ < 2.0 || throw(ArgumentError("gamma must lie in (0, 2)"))
+        0.0 < γ <= 2.0 || throw(ArgumentError("gamma must lie in (0, 2]"))
         push!(gamma_candidates, γ)
     end
 
     if gamma_prime !== nothing
         γp = float(gamma_prime)
-        γp > 2.0 || throw(ArgumentError("gamma_prime must be > 2"))
+        γp >= 2.0 || throw(ArgumentError("gamma_prime must be >= 2"))
         push!(gamma_candidates, 4.0 / γp)
     end
 
     if kappa !== nothing
         κ = float(kappa)
-        0.0 < κ < 4.0 || throw(ArgumentError("kappa must lie in (0, 4); use kappa_prime for the space-filling parameter"))
+        0.0 < κ <= 4.0 || throw(ArgumentError("kappa must lie in (0, 4]; use kappa_prime for the space-filling parameter"))
         push!(gamma_candidates, sqrt(κ))
     end
 
     if kappa_prime !== nothing
         κp = float(kappa_prime)
-        κp > 4.0 || throw(ArgumentError("kappa_prime must be > 4"))
+        κp >= 4.0 || throw(ArgumentError("kappa_prime must be >= 4"))
         push!(gamma_candidates, 4.0 / sqrt(κp))
     end
 
@@ -93,7 +93,7 @@ function _resolve_mated_crt_parameters(;
         abs(candidate - γ) <= 1.0e-8 || throw(ArgumentError("mated_crt parameters specify inconsistent values for gamma / kappa / kappa_prime / gamma_prime / correlation"))
     end
 
-    0.0 < γ < 2.0 || throw(ArgumentError("resolved gamma must lie in (0, 2)"))
+    0.0 < γ <= 2.0 || throw(ArgumentError("resolved gamma must lie in (0, 2]"))
     κ = γ^2
     κp = 16.0 / κ
     γp = 4.0 / γ
@@ -463,6 +463,37 @@ function _mated_crt_append_exact_step_block!(
     throw(ArgumentError("unsupported exact cone-walk step ($dx, $dy)"))
 end
 
+function _mated_crt_sample_unit_corr_sphere_word(
+    target_productions::Integer,
+    rng::AbstractRNG,
+)
+    target = Int(target_productions)
+    target >= 2 || throw(ArgumentError("gamma=2 sphere sampler needs at least two opening letters"))
+    iseven(target) || throw(ArgumentError("gamma=2 sphere sampler requires an even number of opening letters; choose an even number of sphere vertices"))
+
+    dyck_steps = sample_uniform_primitive_dyck_path(target ÷ 2, rng)
+    word = UInt8[]
+    sizehint!(word, 2 * target)
+    height = 0
+
+    for step in dyck_steps
+        if step == 1
+            _mated_crt_append_exact_step_block!(word, height, height, 1, 1, rng)
+            height += 1
+        elseif step == -1
+            height > 0 || throw(ArgumentError("unit-correlation sphere Dyck path closed below zero"))
+            _mated_crt_append_exact_step_block!(word, height, height, -1, -1, rng)
+            height -= 1
+        else
+            throw(ArgumentError("unit-correlation sphere Dyck path steps must be +/-1"))
+        end
+    end
+
+    height == 0 || throw(ArgumentError("unit-correlation sphere Dyck path did not close"))
+    length(word) == 2 * target || throw(ArgumentError("unit-correlation sphere word has the wrong length"))
+    return String(Char.(word))
+end
+
 function _mated_crt_exact_word_coordinates(word::AbstractString)
     chars = codeunits(word)
     L = Vector{Float64}(undef, length(chars) + 1)
@@ -505,6 +536,9 @@ function _mated_crt_sample_exact_sphere_word(
     target >= 1 || throw(ArgumentError("exact cone-walk sphere sampler needs at least one production"))
 
     rho = float(correlation)
+    if rho >= 1.0 - 1.0e-12
+        return _mated_crt_sample_unit_corr_sphere_word(target, rng)
+    end
     if abs(rho) <= 1.0e-12
         return sample_uniform_excursion_word(QuadrantBridgeSampler(target), rng)
     end
@@ -684,6 +718,9 @@ function _mated_crt_sample_approx_sphere_word(
     tail_cutoff = max(0, Int(exact_tail_cutoff))
 
     rho = float(correlation)
+    if rho >= 1.0 - 1.0e-12
+        return _mated_crt_sample_unit_corr_sphere_word(target, rng)
+    end
     if abs(rho) <= 1.0e-12
         return sample_uniform_excursion_word(QuadrantBridgeSampler(target), rng)
     end
@@ -843,7 +880,9 @@ function _build_mated_crt_exact_sphere_map(
     n >= 3 || throw(ArgumentError("mated_crt sphere topology requires at least 3 vertices"))
     target_productions = n - 2
 
-    sampler = if abs(params["correlation"]) <= 1.0e-12
+    sampler = if params["correlation"] >= 1.0 - 1.0e-12
+        "exact_perfect_corr_diagonal_excursion"
+    elseif abs(params["correlation"]) <= 1.0e-12
         "exact_spanning_tree_word"
     else
         "exact_lazy_correlated_cone_walk"
@@ -867,7 +906,9 @@ function _build_mated_crt_approx_sphere_map(
     target_productions = n - 2
     tail_cutoff = max(0, Int(exact_tail_cutoff))
 
-    sampler = if abs(params["correlation"]) <= 1.0e-12
+    sampler = if params["correlation"] >= 1.0 - 1.0e-12
+        "approx_perfect_corr_diagonal_excursion"
+    elseif abs(params["correlation"]) <= 1.0e-12
         "approx_hybrid_zero_corr_exact_tail$(tail_cutoff)"
     else
         "approx_hybrid_cone_walk_tail$(tail_cutoff)"
@@ -1858,6 +1899,8 @@ function build_mated_crt_map(;
             exact_tail_cutoff=sphere_exact_tail_cutoff,
         )
     end
+
+    abs(params["correlation"]) < 1.0 || throw(ArgumentError("disk-topology mated_crt currently requires correlation in (-1, 1); gamma=2 is supported only for sphere topology"))
 
     endpoint = (1.0, 0.0)
     total_steps = n * r

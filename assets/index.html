@@ -37,9 +37,9 @@
     }
   </style>
 </head>
-<body>
-  <div id="app"></div>
-  <div id="hud">
+  <body>
+    <div id="app"></div>
+    <div id="hud">
     <div><strong>randmaps web viewer</strong></div>
     <div id="summary">Loading…</div>
     <div id="legend"></div>
@@ -77,8 +77,16 @@
     const SPHERE_EDGE_SCALE = 1.006;
 
     const app = document.getElementById('app');
+    const hud = document.getElementById('hud');
     const summary = document.getElementById('summary');
     const legend = document.getElementById('legend');
+    const searchParams = new URLSearchParams(window.location.search);
+    const embedMode = ['1', 'true', 'yes'].includes(String(searchParams.get('embed') ?? '').toLowerCase());
+    const requestedAutoRotate = searchParams.get('autorotate');
+
+    if (embedMode) {
+      hud.style.display = 'none';
+    }
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0xf6f8fb);
@@ -105,9 +113,16 @@
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
+    controls.autoRotate = false;
+    controls.autoRotateSpeed = 0.9;
     if (is2D) {
       controls.enableRotate = false;
       controls.screenSpacePanning = true;
+    } else {
+      const autoRotateEnabled = requestedAutoRotate === null
+        ? embedMode
+        : ['1', 'true', 'yes'].includes(String(requestedAutoRotate).toLowerCase());
+      controls.autoRotate = autoRotateEnabled;
     }
 
     if (!is2D) {
@@ -845,11 +860,19 @@
         : collectFiniteXYZ(verts);
     const points = finitePoints.length ? finitePoints : [0, 0, 0];
 
-    if (is2D) {
-      fitOrthoCamera(points);
-    } else {
-      fitPerspectiveCamera(points);
+    function setAutoRotate(enabled) {
+      controls.autoRotate = !is2D && !!enabled;
     }
+
+    function resetCameraView() {
+      if (is2D) {
+        fitOrthoCamera(points);
+      } else {
+        fitPerspectiveCamera(points);
+      }
+    }
+
+    resetCameraView();
 
     if (sphereProjection && sphereRadius) {
       const sphereGeometry = new THREE.SphereGeometry(sphereRadius * SPHERE_SHELL_SCALE, 96, 64);
@@ -1136,6 +1159,18 @@
       } else {
         camera.aspect = window.innerWidth / window.innerHeight;
         camera.updateProjectionMatrix();
+      }
+    });
+
+    window.addEventListener('message', (event) => {
+      const data = event?.data;
+      if (!data || data.kind !== 'randmaps-embed-control') {
+        return;
+      }
+      if (data.action === 'setAutoRotate') {
+        setAutoRotate(Boolean(data.value));
+      } else if (data.action === 'resetView') {
+        resetCameraView();
       }
     });
 
